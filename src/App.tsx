@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState, type PointerEvent } from "react";
+import { useEffect, useRef, useState, useCallback, type PointerEvent } from "react";
 
 type Tool = "food" | "wall" | "erase" | "nest";
-type ViewMode = "colony" | "visualizer" | "science";
+type ViewMode = "colony" | "visualizer" | "science" | "wars" | "nebula" | "bio";
 type TrailMode = "colored" | "heatmap" | "invisible";
 type TrailPalette =
   | "colony"
@@ -11,7 +11,9 @@ type TrailPalette =
   | "ghost"
   | "acid"
   | "ice"
-  | "inferno";
+  | "inferno"
+  | "nebula"
+  | "bio";
 type AntDisplay = "ants" | "particles" | "hidden";
 type AntState = "searching" | "returning";
 
@@ -35,6 +37,7 @@ type Ant = {
   memoryY: number;
   memoryStrength: number;
   trailCommitment: number;
+  colony: 0 | 1;
 };
 
 type FoodSource = {
@@ -78,6 +81,8 @@ type Stats = {
   searchingAnts: number;
   returningAnts: number;
   elapsedSeconds: number;
+  colony0Collected: number;
+  colony1Collected: number;
 };
 
 const WORLD_WIDTH = 1100;
@@ -141,7 +146,7 @@ function formatTime(seconds: number) {
   return `${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}`;
 }
 
-function createAnt(nestX: number, nestY: number): Ant {
+function createAnt(nestX: number, nestY: number, colony: 0 | 1 = 0): Ant {
   return {
     x: nestX + randomBetween(-NEST_RADIUS * 0.45, NEST_RADIUS * 0.45),
     y: nestY + randomBetween(-NEST_RADIUS * 0.45, NEST_RADIUS * 0.45),
@@ -161,34 +166,62 @@ function createAnt(nestX: number, nestY: number): Ant {
     memoryX: nestX,
     memoryY: nestY,
     memoryStrength: 0,
-    trailCommitment: randomBetween(0.35, 0.9)
+    trailCommitment: randomBetween(0.35, 0.9),
+    colony
   };
 }
 
-function makeAnts(count: number, nestX: number, nestY: number) {
-  return Array.from({ length: count }, () => createAnt(nestX, nestY));
+function makeAnts(count: number, nestX: number, nestY: number, colony: 0 | 1 = 0) {
+  return Array.from({ length: count }, () => createAnt(nestX, nestY, colony));
 }
+
+// Star field for nebula/bio backgrounds — generated once, stored as module-level array
+const STAR_FIELD = Array.from({ length: 220 }, () => ({
+  x: Math.random() * WORLD_WIDTH,
+  y: Math.random() * WORLD_HEIGHT,
+  r: Math.random() * 1.4 + 0.3,
+  a: Math.random() * 0.7 + 0.15
+}));
 
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const trailCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const trailCanvas0Ref = useRef<HTMLCanvasElement | null>(null);
+  const trailCanvas1Ref = useRef<HTMLCanvasElement | null>(null);
 
   const antsRef = useRef<Ant[]>([]);
   const foodRef = useRef<FoodSource[]>([]);
 
+  // Single-colony pheromone arrays (non-wars modes)
   const foodPheromoneRef = useRef<Float32Array>(new Float32Array(GRID_SIZE));
   const homePheromoneRef = useRef<Float32Array>(new Float32Array(GRID_SIZE));
   const foodAgeRef = useRef<Uint16Array>(new Uint16Array(GRID_SIZE));
   const homeAgeRef = useRef<Uint16Array>(new Uint16Array(GRID_SIZE));
 
+  // Wars-mode per-colony pheromone arrays
+  const colony0FoodRef = useRef<Float32Array>(new Float32Array(GRID_SIZE));
+  const colony0HomeRef = useRef<Float32Array>(new Float32Array(GRID_SIZE));
+  const colony1FoodRef = useRef<Float32Array>(new Float32Array(GRID_SIZE));
+  const colony1HomeRef = useRef<Float32Array>(new Float32Array(GRID_SIZE));
+  const colony0FoodAgeRef = useRef<Uint16Array>(new Uint16Array(GRID_SIZE));
+  const colony0HomeAgeRef = useRef<Uint16Array>(new Uint16Array(GRID_SIZE));
+  const colony1FoodAgeRef = useRef<Uint16Array>(new Uint16Array(GRID_SIZE));
+  const colony1HomeAgeRef = useRef<Uint16Array>(new Uint16Array(GRID_SIZE));
+
   const wallsRef = useRef<Uint8Array>(new Uint8Array(GRID_SIZE));
 
+  // Nests: nestRef = single-colony nest, nestARef/nestBRef = wars-mode nests
   const nestRef = useRef({ x: WORLD_WIDTH * 0.38, y: WORLD_HEIGHT * 0.52 });
+  const nestARef = useRef({ x: 300, y: 360 });
+  const nestBRef = useRef({ x: 800, y: 360 });
+
   const pointerRef = useRef({ isDown: false, x: 0, y: 0 });
   const animationRef = useRef<number | null>(null);
   const startedAtRef = useRef<number>(performance.now());
   const lastStatsUpdateRef = useRef<number>(0);
   const foodCollectedRef = useRef<number>(0);
+  const colony0CollectedRef = useRef<number>(0);
+  const colony1CollectedRef = useRef<number>(0);
 
   const [tool, setTool] = useState<Tool>("food");
   const [isPaused, setIsPaused] = useState(false);
@@ -227,7 +260,9 @@ export default function App() {
     activeAnts: 0,
     searchingAnts: 0,
     returningAnts: 0,
-    elapsedSeconds: 0
+    elapsedSeconds: 0,
+    colony0Collected: 0,
+    colony1Collected: 0
   });
 
   useEffect(() => {
@@ -239,7 +274,12 @@ export default function App() {
   }, [isPaused]);
 
   useEffect(() => {
-    antsRef.current = makeAnts(settingsRef.current.antCount, nestRef.current.x, nestRef.current.y);
+    antsRef.current = makeAnts(
+      settingsRef.current.antCount,
+      nestRef.current.x,
+      nestRef.current.y,
+      0
+    );
     startedAtRef.current = performance.now();
 
     animationRef.current = requestAnimationFrame(tick);
@@ -247,10 +287,14 @@ export default function App() {
     return () => {
       if (animationRef.current) cancelAnimationFrame(animationRef.current);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
-    resizeAntPopulation(settings.antCount);
+    const mode = settingsRef.current.viewMode;
+    if (mode !== "wars") {
+      resizeAntPopulation(settings.antCount);
+    }
   }, [settings.antCount]);
 
   function resizeAntPopulation(newCount: number) {
@@ -259,7 +303,7 @@ export default function App() {
 
     if (newCount > ants.length) {
       for (let i = ants.length; i < newCount; i++) {
-        ants.push(createAnt(nest.x, nest.y));
+        ants.push(createAnt(nest.x, nest.y, 0));
       }
     } else {
       ants.length = newCount;
@@ -268,14 +312,27 @@ export default function App() {
 
   function resetSimulation() {
     const nest = nestRef.current;
+    const mode = settingsRef.current.viewMode;
 
-    antsRef.current = makeAnts(settingsRef.current.antCount, nest.x, nest.y);
+    if (mode === "wars") {
+      const nestA = nestARef.current;
+      const nestB = nestBRef.current;
+      const countEach = 200;
+      antsRef.current = [
+        ...makeAnts(countEach, nestA.x, nestA.y, 0),
+        ...makeAnts(countEach, nestB.x, nestB.y, 1)
+      ];
+    } else {
+      antsRef.current = makeAnts(settingsRef.current.antCount, nest.x, nest.y, 0);
+    }
+
     foodRef.current = [];
-
     clearTrails();
     clearWalls();
 
     foodCollectedRef.current = 0;
+    colony0CollectedRef.current = 0;
+    colony1CollectedRef.current = 0;
     startedAtRef.current = performance.now();
   }
 
@@ -284,6 +341,15 @@ export default function App() {
     homePheromoneRef.current = new Float32Array(GRID_SIZE);
     foodAgeRef.current = new Uint16Array(GRID_SIZE);
     homeAgeRef.current = new Uint16Array(GRID_SIZE);
+
+    colony0FoodRef.current = new Float32Array(GRID_SIZE);
+    colony0HomeRef.current = new Float32Array(GRID_SIZE);
+    colony1FoodRef.current = new Float32Array(GRID_SIZE);
+    colony1HomeRef.current = new Float32Array(GRID_SIZE);
+    colony0FoodAgeRef.current = new Uint16Array(GRID_SIZE);
+    colony0HomeAgeRef.current = new Uint16Array(GRID_SIZE);
+    colony1FoodAgeRef.current = new Uint16Array(GRID_SIZE);
+    colony1HomeAgeRef.current = new Uint16Array(GRID_SIZE);
   }
 
   function clearWalls() {
@@ -364,6 +430,103 @@ export default function App() {
         hideWallsInVisualizer: false
       }));
     }
+
+    if (nextMode === "wars") {
+      clearTrails();
+
+      // Build wars ants from both nests
+      const countEach = 200;
+      const nestA = nestARef.current;
+      const nestB = nestBRef.current;
+      antsRef.current = [
+        ...makeAnts(countEach, nestA.x, nestA.y, 0),
+        ...makeAnts(countEach, nestB.x, nestB.y, 1)
+      ];
+
+      colony0CollectedRef.current = 0;
+      colony1CollectedRef.current = 0;
+
+      // Seed 3 food sources between nests
+      foodRef.current = [
+        makeFoodAt(500, 260, 260, 1.0),
+        makeFoodAt(600, 430, 260, 1.0),
+        makeFoodAt(540, 360, 260, 1.0)
+      ];
+
+      setSettings((current) => ({
+        ...current,
+        viewMode: "wars",
+        antCount: 400,
+        antSpeed: 1.1,
+        exploration: 0.88,
+        evaporation: 0.987,
+        sensorDistance: 24,
+        showSensors: false,
+        showFlowField: false,
+        showAgeContours: false,
+        antDisplay: "ants",
+        trailMode: "colored",
+        trailPalette: "colony",
+        trailIntensity: 1.4,
+        trailBloom: 0.8,
+        pheromoneTtl: 900,
+        trailThreshold: 12,
+        hideWorldInVisualizer: false,
+        hideWallsInVisualizer: false
+      }));
+    }
+
+    if (nextMode === "nebula") {
+      clearTrails();
+
+      setSettings((current) => ({
+        ...current,
+        viewMode: "nebula",
+        antCount: 1800,
+        antSpeed: 1.8,
+        exploration: 1.15,
+        evaporation: 0.992,
+        sensorDistance: 38,
+        showSensors: false,
+        showFlowField: false,
+        showAgeContours: false,
+        antDisplay: "hidden",
+        trailMode: "heatmap",
+        trailPalette: "nebula",
+        trailIntensity: 3.0,
+        trailBloom: 2.2,
+        pheromoneTtl: 1200,
+        trailThreshold: 18,
+        hideWorldInVisualizer: true,
+        hideWallsInVisualizer: true
+      }));
+    }
+
+    if (nextMode === "bio") {
+      clearTrails();
+
+      setSettings((current) => ({
+        ...current,
+        viewMode: "bio",
+        antCount: 1400,
+        antSpeed: 1.4,
+        exploration: 0.95,
+        evaporation: 0.991,
+        sensorDistance: 32,
+        showSensors: false,
+        showFlowField: false,
+        showAgeContours: false,
+        antDisplay: "hidden",
+        trailMode: "heatmap",
+        trailPalette: "bio",
+        trailIntensity: 2.8,
+        trailBloom: 2.0,
+        pheromoneTtl: 1500,
+        trailThreshold: 16,
+        hideWorldInVisualizer: true,
+        hideWallsInVisualizer: true
+      }));
+    }
   }
 
   function seedDemo() {
@@ -411,10 +574,7 @@ export default function App() {
     }
   }
 
-  function makeFood(x: number, y: number): FoodSource {
-    const amount = settingsRef.current.foodAmount;
-    const quality = settingsRef.current.foodQuality;
-
+  function makeFoodAt(x: number, y: number, amount: number, quality: number): FoodSource {
     return {
       x,
       y,
@@ -423,6 +583,12 @@ export default function App() {
       maxAmount: amount,
       quality
     };
+  }
+
+  function makeFood(x: number, y: number): FoodSource {
+    const amount = settingsRef.current.foodAmount;
+    const quality = settingsRef.current.foodQuality;
+    return makeFoodAt(x, y, amount, quality);
   }
 
   function addFood(x: number, y: number) {
@@ -479,6 +645,22 @@ export default function App() {
 
   function depositHomePheromone(x: number, y: number, amount: number, radius = 1) {
     depositIntoLayer(homePheromoneRef.current, homeAgeRef.current, x, y, amount, radius);
+  }
+
+  function depositColonyFood(colony: 0 | 1, x: number, y: number, amount: number, radius = 1) {
+    if (colony === 0) {
+      depositIntoLayer(colony0FoodRef.current, colony0FoodAgeRef.current, x, y, amount, radius);
+    } else {
+      depositIntoLayer(colony1FoodRef.current, colony1FoodAgeRef.current, x, y, amount, radius);
+    }
+  }
+
+  function depositColonyHome(colony: 0 | 1, x: number, y: number, amount: number, radius = 1) {
+    if (colony === 0) {
+      depositIntoLayer(colony0HomeRef.current, colony0HomeAgeRef.current, x, y, amount, radius);
+    } else {
+      depositIntoLayer(colony1HomeRef.current, colony1HomeAgeRef.current, x, y, amount, radius);
+    }
   }
 
   function layerValue(map: Float32Array, ageMap: Uint16Array, index: number) {
@@ -565,15 +747,38 @@ export default function App() {
 
   function updateAnt(ant: Ant) {
     const currentSettings = settingsRef.current;
+    const isWars = currentSettings.viewMode === "wars";
 
     ant.age += 1;
     ant.stateAge += 1;
 
-    const followMap =
-      ant.state === "searching" ? foodPheromoneRef.current : homePheromoneRef.current;
+    // Route pheromone maps based on mode and colony
+    let followFoodMap: Float32Array;
+    let followFoodAgeMap: Uint16Array;
+    let followHomeMap: Float32Array;
+    let followHomeAgeMap: Uint16Array;
 
-    const followAgeMap =
-      ant.state === "searching" ? foodAgeRef.current : homeAgeRef.current;
+    if (isWars) {
+      if (ant.colony === 0) {
+        followFoodMap = colony0FoodRef.current;
+        followFoodAgeMap = colony0FoodAgeRef.current;
+        followHomeMap = colony0HomeRef.current;
+        followHomeAgeMap = colony0HomeAgeRef.current;
+      } else {
+        followFoodMap = colony1FoodRef.current;
+        followFoodAgeMap = colony1FoodAgeRef.current;
+        followHomeMap = colony1HomeRef.current;
+        followHomeAgeMap = colony1HomeAgeRef.current;
+      }
+    } else {
+      followFoodMap = foodPheromoneRef.current;
+      followFoodAgeMap = foodAgeRef.current;
+      followHomeMap = homePheromoneRef.current;
+      followHomeAgeMap = homeAgeRef.current;
+    }
+
+    const followMap = ant.state === "searching" ? followFoodMap : followHomeMap;
+    const followAgeMap = ant.state === "searching" ? followFoodAgeMap : followHomeAgeMap;
 
     const sensorDistance = currentSettings.sensorDistance;
     const sensorAngle = currentSettings.sensorAngle;
@@ -591,32 +796,9 @@ export default function App() {
       ant.angle -= 0.34;
     }
 
-    const left = smellLayer(
-      followMap,
-      followAgeMap,
-      ant.x,
-      ant.y,
-      ant.angle - sensorAngle,
-      sensorDistance
-    );
-
-    const center = smellLayer(
-      followMap,
-      followAgeMap,
-      ant.x,
-      ant.y,
-      ant.angle,
-      sensorDistance
-    );
-
-    const right = smellLayer(
-      followMap,
-      followAgeMap,
-      ant.x,
-      ant.y,
-      ant.angle + sensorAngle,
-      sensorDistance
-    );
+    const left = smellLayer(followMap, followAgeMap, ant.x, ant.y, ant.angle - sensorAngle, sensorDistance);
+    const center = smellLayer(followMap, followAgeMap, ant.x, ant.y, ant.angle, sensorDistance);
+    const right = smellLayer(followMap, followAgeMap, ant.x, ant.y, ant.angle + sensorAngle, sensorDistance);
 
     const weightedLeft = left * ant.pheromoneSensitivity;
     const weightedCenter = center * ant.pheromoneSensitivity;
@@ -634,6 +816,11 @@ export default function App() {
       }
     }
 
+    // Determine which nest this ant belongs to
+    const homeNest = isWars
+      ? (ant.colony === 0 ? nestARef.current : nestBRef.current)
+      : nestRef.current;
+
     if (ant.state === "searching") {
       const closestFood = getClosestFoodInRange(ant.x, ant.y, 90);
 
@@ -649,24 +836,22 @@ export default function App() {
       }
 
       const nestDistance = Math.sqrt(
-        distanceSquared(ant.x, ant.y, nestRef.current.x, nestRef.current.y)
+        distanceSquared(ant.x, ant.y, homeNest.x, homeNest.y)
       );
 
       const homeTrailDecay = clamp(1 - ant.stateAge / 900, 0.12, 1);
       const nestProximity = clamp(1 - nestDistance / 620, 0.08, 1);
 
       if (ant.age % 2 < 1) {
-        depositHomePheromone(
-          ant.x,
-          ant.y,
-          0.34 * ant.depositStrength * homeTrailDecay * nestProximity,
-          1
-        );
+        if (isWars) {
+          depositColonyHome(ant.colony, ant.x, ant.y, 0.34 * ant.depositStrength * homeTrailDecay * nestProximity, 1);
+        } else {
+          depositHomePheromone(ant.x, ant.y, 0.34 * ant.depositStrength * homeTrailDecay * nestProximity, 1);
+        }
       }
     } else {
-      const nest = nestRef.current;
-      const homeAngle = angleTo(ant.x, ant.y, nest.x, nest.y);
-      const homeDistance = Math.sqrt(distanceSquared(ant.x, ant.y, nest.x, nest.y));
+      const homeAngle = angleTo(ant.x, ant.y, homeNest.x, homeNest.y);
+      const homeDistance = Math.sqrt(distanceSquared(ant.x, ant.y, homeNest.x, homeNest.y));
       const homePull = clamp(0.038 + homeDistance / 17000, 0.045, 0.14);
 
       ant.angle = mixAngle(ant.angle, homeAngle, homePull);
@@ -674,12 +859,11 @@ export default function App() {
       const foodTrailDecay = clamp(1 - ant.stateAge / 950, 0.22, 1);
       const distanceBoost = clamp(homeDistance / 380, 0.32, 1.35);
 
-      depositFoodPheromone(
-        ant.x,
-        ant.y,
-        2.7 * ant.depositStrength * ant.carriedQuality * distanceBoost * foodTrailDecay,
-        2
-      );
+      if (isWars) {
+        depositColonyFood(ant.colony, ant.x, ant.y, 2.7 * ant.depositStrength * ant.carriedQuality * distanceBoost * foodTrailDecay, 2);
+      } else {
+        depositFoodPheromone(ant.x, ant.y, 2.7 * ant.depositStrength * ant.carriedQuality * distanceBoost * foodTrailDecay, 2);
+      }
     }
 
     ant.turnBias += randomBetween(-0.0055, 0.0055);
@@ -708,7 +892,6 @@ export default function App() {
     ant.y += Math.sin(ant.angle) * speed;
 
     let collided = false;
-
     const margin = 12;
 
     if (ant.x < margin || ant.x > WORLD_WIDTH - margin) {
@@ -764,6 +947,11 @@ export default function App() {
   }
 
   function handleFoodAndNest(ant: Ant) {
+    const isWars = settingsRef.current.viewMode === "wars";
+    const homeNest = isWars
+      ? (ant.colony === 0 ? nestARef.current : nestBRef.current)
+      : nestRef.current;
+
     if (ant.state === "searching") {
       for (const food of foodRef.current) {
         if (food.amount <= 0) continue;
@@ -780,14 +968,13 @@ export default function App() {
           ant.memoryX = food.x;
           ant.memoryY = food.y;
           ant.memoryStrength = clamp(0.45 + food.quality * 0.18, 0.45, 0.96);
-          ant.angle = angleTo(ant.x, ant.y, nestRef.current.x, nestRef.current.y);
+          ant.angle = angleTo(ant.x, ant.y, homeNest.x, homeNest.y);
 
-          depositFoodPheromone(
-            ant.x,
-            ant.y,
-            44 * food.quality * ant.depositStrength,
-            2
-          );
+          if (isWars) {
+            depositColonyFood(ant.colony, ant.x, ant.y, 44 * food.quality * ant.depositStrength, 2);
+          } else {
+            depositFoodPheromone(ant.x, ant.y, 44 * food.quality * ant.depositStrength, 2);
+          }
 
           break;
         }
@@ -795,10 +982,13 @@ export default function App() {
 
       foodRef.current = foodRef.current.filter((food) => food.amount > 0);
     } else {
-      const nest = nestRef.current;
-
-      if (distanceSquared(ant.x, ant.y, nest.x, nest.y) <= NEST_RADIUS * NEST_RADIUS) {
+      if (distanceSquared(ant.x, ant.y, homeNest.x, homeNest.y) <= NEST_RADIUS * NEST_RADIUS) {
         foodCollectedRef.current += 1;
+
+        if (isWars) {
+          if (ant.colony === 0) colony0CollectedRef.current += 1;
+          else colony1CollectedRef.current += 1;
+        }
 
         ant.state = "searching";
         ant.stateAge = 0;
@@ -806,20 +996,23 @@ export default function App() {
         ant.carriedQuality = 1;
         ant.angle += Math.PI + randomBetween(-0.85, 0.85);
 
-        depositHomePheromone(ant.x, ant.y, 34 * ant.depositStrength, 2);
+        if (isWars) {
+          depositColonyHome(ant.colony, ant.x, ant.y, 34 * ant.depositStrength, 2);
+        } else {
+          depositHomePheromone(ant.x, ant.y, 34 * ant.depositStrength, 2);
+        }
       }
     }
   }
 
-  function updatePheromones() {
+  function updatePheromonesForMap(
+    foodMap: Float32Array,
+    homeMap: Float32Array,
+    foodAge: Uint16Array,
+    homeAge: Uint16Array
+  ) {
     const currentSettings = settingsRef.current;
-
-    const foodMap = foodPheromoneRef.current;
-    const homeMap = homePheromoneRef.current;
-    const foodAge = foodAgeRef.current;
-    const homeAge = homeAgeRef.current;
     const walls = wallsRef.current;
-
     const evaporation = currentSettings.evaporation;
     const ttl = currentSettings.pheromoneTtl;
 
@@ -855,6 +1048,32 @@ export default function App() {
 
     diffuseLite(foodMap, foodAge);
     diffuseLite(homeMap, homeAge);
+  }
+
+  function updatePheromones() {
+    const isWars = settingsRef.current.viewMode === "wars";
+
+    if (isWars) {
+      updatePheromonesForMap(
+        colony0FoodRef.current,
+        colony0HomeRef.current,
+        colony0FoodAgeRef.current,
+        colony0HomeAgeRef.current
+      );
+      updatePheromonesForMap(
+        colony1FoodRef.current,
+        colony1HomeRef.current,
+        colony1FoodAgeRef.current,
+        colony1HomeAgeRef.current
+      );
+    } else {
+      updatePheromonesForMap(
+        foodPheromoneRef.current,
+        homePheromoneRef.current,
+        foodAgeRef.current,
+        homeAgeRef.current
+      );
+    }
   }
 
   function diffuseLite(map: Float32Array, ageMap: Uint16Array) {
@@ -916,7 +1135,9 @@ export default function App() {
       activeAnts: ants.length,
       searchingAnts: searching,
       returningAnts: returning,
-      elapsedSeconds: Math.floor((performance.now() - startedAtRef.current) / 1000)
+      elapsedSeconds: Math.floor((performance.now() - startedAtRef.current) / 1000),
+      colony0Collected: colony0CollectedRef.current,
+      colony1Collected: colony1CollectedRef.current
     });
   }
 
@@ -929,11 +1150,18 @@ export default function App() {
 
     const currentSettings = settingsRef.current;
     const isVisualizer = currentSettings.viewMode === "visualizer";
+    const isWars = currentSettings.viewMode === "wars";
+    const isNebula = currentSettings.viewMode === "nebula";
+    const isBio = currentSettings.viewMode === "bio";
 
     drawBackground(ctx);
 
     if (currentSettings.trailMode !== "invisible") {
-      drawPheromones(ctx);
+      if (isWars) {
+        drawPheromonesWars(ctx);
+      } else {
+        drawPheromones(ctx);
+      }
     }
 
     if (currentSettings.showFlowField && currentSettings.trailMode !== "invisible") {
@@ -945,12 +1173,12 @@ export default function App() {
     }
 
     const shouldHideWorld =
-      isVisualizer &&
+      (isVisualizer || isNebula || isBio) &&
       currentSettings.hideWorldInVisualizer &&
       currentSettings.antDisplay === "hidden";
 
     const shouldHideWalls =
-      isVisualizer &&
+      (isVisualizer || isNebula || isBio) &&
       currentSettings.hideWallsInVisualizer &&
       currentSettings.antDisplay === "hidden";
 
@@ -960,11 +1188,19 @@ export default function App() {
 
     if (!shouldHideWorld) {
       drawFood(ctx);
-      drawNest(ctx);
+      if (isWars) {
+        drawNestWars(ctx);
+      } else {
+        drawNest(ctx);
+      }
     }
 
     if (currentSettings.antDisplay === "ants") {
-      drawAnts(ctx);
+      if (isWars) {
+        drawAntsWars(ctx);
+      } else {
+        drawAnts(ctx);
+      }
     } else if (currentSettings.antDisplay === "particles") {
       drawAntParticles(ctx);
     }
@@ -976,7 +1212,62 @@ export default function App() {
 
   function drawBackground(ctx: CanvasRenderingContext2D) {
     const currentSettings = settingsRef.current;
-    const visualMode = currentSettings.viewMode === "visualizer";
+    const mode = currentSettings.viewMode;
+
+    if (mode === "nebula" || mode === "bio") {
+      // Pure black (nebula) or deep ocean (bio)
+      ctx.fillStyle = mode === "bio" ? "#000508" : "#000000";
+      ctx.fillRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+
+      // Star field for both art modes
+      ctx.save();
+      for (const star of STAR_FIELD) {
+        ctx.beginPath();
+        ctx.fillStyle = `rgba(255,255,255,${star.a * (mode === "bio" ? 0.4 : 0.85)})`;
+        ctx.arc(star.x, star.y, star.r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+      return;
+    }
+
+    if (mode === "wars") {
+      // Dark base
+      ctx.fillStyle = "#070911";
+      ctx.fillRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+
+      // Subtle territory tints
+      const leftGrad = ctx.createLinearGradient(0, 0, WORLD_WIDTH * 0.5, 0);
+      leftGrad.addColorStop(0, "rgba(255,179,71,0.055)");
+      leftGrad.addColorStop(1, "rgba(255,179,71,0)");
+      ctx.fillStyle = leftGrad;
+      ctx.fillRect(0, 0, WORLD_WIDTH * 0.5, WORLD_HEIGHT);
+
+      const rightGrad = ctx.createLinearGradient(WORLD_WIDTH, 0, WORLD_WIDTH * 0.5, 0);
+      rightGrad.addColorStop(0, "rgba(0,229,255,0.055)");
+      rightGrad.addColorStop(1, "rgba(0,229,255,0)");
+      ctx.fillStyle = rightGrad;
+      ctx.fillRect(WORLD_WIDTH * 0.5, 0, WORLD_WIDTH * 0.5, WORLD_HEIGHT);
+
+      // Subtle grid
+      ctx.strokeStyle = "rgba(255,255,255,0.018)";
+      ctx.lineWidth = 1;
+      for (let x = 0; x < WORLD_WIDTH; x += 40) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, WORLD_HEIGHT);
+        ctx.stroke();
+      }
+      for (let y = 0; y < WORLD_HEIGHT; y += 40) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(WORLD_WIDTH, y);
+        ctx.stroke();
+      }
+      return;
+    }
+
+    const visualMode = mode === "visualizer";
 
     const gradient = ctx.createRadialGradient(
       WORLD_WIDTH * 0.45,
@@ -1037,7 +1328,6 @@ export default function App() {
 
     if (palette === "ghost") {
       const v = clamp(140 + combinedPower * 130 + freshness * 40, 0, 255);
-
       return {
         r: clamp(v * 0.66 + foodPower * 70, 0, 255),
         g: clamp(v * 0.78 + homePower * 65, 0, 255),
@@ -1077,6 +1367,23 @@ export default function App() {
       };
     }
 
+    if (palette === "nebula") {
+      return {
+        r: clamp(foodPower * 200 + heat * 180, 0, 255),
+        g: clamp(homePower * 80 + heat * 120, 0, 255),
+        b: clamp(60 + foodPower * 220 + heat * 40, 0, 255)
+      };
+    }
+
+    if (palette === "bio") {
+      return {
+        r: clamp(combinedPower * 20, 0, 255),
+        g: clamp(80 + homePower * 220 + freshness * 80, 0, 255),
+        b: clamp(100 + foodPower * 255 + heat * 80, 0, 255)
+      };
+    }
+
+    // Default: colony
     return {
       r: clamp(foodPower * 120 + homePower * 65 + freshness * 32, 0, 255),
       g: clamp(homePower * 235 + foodPower * 150, 0, 255),
@@ -1084,26 +1391,15 @@ export default function App() {
     };
   }
 
-  function drawPheromones(ctx: CanvasRenderingContext2D) {
-    let trailCanvas = trailCanvasRef.current;
-
-    if (!trailCanvas) {
-      trailCanvas = document.createElement("canvas");
-      trailCanvas.width = GRID_WIDTH;
-      trailCanvas.height = GRID_HEIGHT;
-      trailCanvasRef.current = trailCanvas;
-    }
-
-    const trailCtx = trailCanvas.getContext("2d");
-    if (!trailCtx) return;
-
-    const image = trailCtx.createImageData(GRID_WIDTH, GRID_HEIGHT);
-
-    const foodMap = foodPheromoneRef.current;
-    const homeMap = homePheromoneRef.current;
-    const foodAge = foodAgeRef.current;
-    const homeAge = homeAgeRef.current;
+  function buildTrailImage(
+    foodMap: Float32Array,
+    homeMap: Float32Array,
+    foodAge: Uint16Array,
+    homeAge: Uint16Array,
+    palette: TrailPalette
+  ) {
     const currentSettings = settingsRef.current;
+    const image = new ImageData(GRID_WIDTH, GRID_HEIGHT);
 
     for (let i = 0; i < GRID_SIZE; i++) {
       const foodFreshness =
@@ -1129,14 +1425,7 @@ export default function App() {
       const heat = clamp(Math.log1p(foodValue + homeValue) / 7.25, 0, 1);
       const freshness = clamp(Math.max(foodFreshness, homeFreshness), 0, 1);
 
-      const color = paletteColor(
-        currentSettings.trailPalette,
-        foodPower,
-        homePower,
-        combinedPower,
-        heat,
-        freshness
-      );
+      const color = paletteColor(palette, foodPower, homePower, combinedPower, heat, freshness);
 
       const alphaBase =
         currentSettings.trailMode === "heatmap"
@@ -1149,27 +1438,182 @@ export default function App() {
       image.data[p + 3] = alphaBase * clamp(0.4 + freshness * 0.8, 0, 1);
     }
 
-    trailCtx.putImageData(image, 0, 0);
+    return image;
+  }
+
+  function renderTrailCanvas(
+    ctx: CanvasRenderingContext2D,
+    offscreen: HTMLCanvasElement,
+    image: ImageData,
+    compositeOp: GlobalCompositeOperation = "screen"
+  ) {
+    const currentSettings = settingsRef.current;
+    const offCtx = offscreen.getContext("2d");
+    if (!offCtx) return;
+
+    offCtx.putImageData(image, 0, 0);
 
     ctx.save();
     ctx.imageSmoothingEnabled = true;
-    ctx.globalCompositeOperation = "screen";
+    ctx.globalCompositeOperation = compositeOp;
 
     if (currentSettings.trailBloom > 0) {
       ctx.filter = `blur(${currentSettings.trailBloom * 12}px)`;
       ctx.globalAlpha = clamp(currentSettings.trailBloom * 0.32, 0, 0.7);
-      ctx.drawImage(trailCanvas, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+      ctx.drawImage(offscreen, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
 
       ctx.filter = `blur(${currentSettings.trailBloom * 5.5}px)`;
       ctx.globalAlpha = clamp(currentSettings.trailBloom * 0.46, 0, 0.9);
-      ctx.drawImage(trailCanvas, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+      ctx.drawImage(offscreen, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
 
       ctx.filter = "none";
       ctx.globalAlpha = 1;
     }
 
-    ctx.drawImage(trailCanvas, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+    ctx.drawImage(offscreen, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+    ctx.restore();
+  }
 
+  function getOrCreateOffscreen(
+    ref: React.MutableRefObject<HTMLCanvasElement | null>
+  ): HTMLCanvasElement {
+    if (!ref.current) {
+      const c = document.createElement("canvas");
+      c.width = GRID_WIDTH;
+      c.height = GRID_HEIGHT;
+      ref.current = c;
+    }
+    return ref.current;
+  }
+
+  function drawPheromones(ctx: CanvasRenderingContext2D) {
+    const currentSettings = settingsRef.current;
+    const offscreen = getOrCreateOffscreen(trailCanvasRef);
+
+    const image = buildTrailImage(
+      foodPheromoneRef.current,
+      homePheromoneRef.current,
+      foodAgeRef.current,
+      homeAgeRef.current,
+      currentSettings.trailPalette
+    );
+
+    renderTrailCanvas(ctx, offscreen, image, "screen");
+  }
+
+  function drawPheromonesWars(ctx: CanvasRenderingContext2D) {
+    const currentSettings = settingsRef.current;
+
+    // Colony 0 (amber) — food trail rendered in warm orange/amber
+    const offscreen0 = getOrCreateOffscreen(trailCanvas0Ref);
+    const image0 = new ImageData(GRID_WIDTH, GRID_HEIGHT);
+
+    const food0 = colony0FoodRef.current;
+    const home0 = colony0HomeRef.current;
+    const foodAge0 = colony0FoodAgeRef.current;
+    const homeAge0 = colony0HomeAgeRef.current;
+    const ttl = currentSettings.pheromoneTtl;
+    const intensity = currentSettings.trailIntensity;
+
+    for (let i = 0; i < GRID_SIZE; i++) {
+      const ff = food0[i] > 0 ? clamp(1 - foodAge0[i] / ttl, 0, 1) : 0;
+      const hf = home0[i] > 0 ? clamp(1 - homeAge0[i] / ttl, 0, 1) : 0;
+      const fv = food0[i] * ff * intensity;
+      const hv = home0[i] * hf * intensity;
+      const fp = 1 - Math.exp(-fv / 90);
+      const hp = 1 - Math.exp(-hv / 80);
+      const cp = clamp(fp + hp, 0, 1);
+
+      if (cp <= 0.006) { image0.data[i * 4 + 3] = 0; continue; }
+
+      const heat = clamp(Math.log1p(fv + hv) / 7.25, 0, 1);
+      const fresh = clamp(Math.max(ff, hf), 0, 1);
+
+      // Amber/orange palette for colony 0
+      image0.data[i * 4] = clamp(180 + fp * 75 + heat * 60, 0, 255);
+      image0.data[i * 4 + 1] = clamp(90 + fp * 100 + hp * 80 + heat * 40, 0, 255);
+      image0.data[i * 4 + 2] = clamp(fp * 30 + hp * 20, 0, 255);
+      const aBase = currentSettings.trailMode === "heatmap"
+        ? clamp(40 + heat * 220, 0, 245)
+        : clamp(24 + cp * 200, 0, 230);
+      image0.data[i * 4 + 3] = aBase * clamp(0.4 + fresh * 0.8, 0, 1);
+    }
+
+    const offCtx0 = offscreen0.getContext("2d");
+    if (offCtx0) offCtx0.putImageData(image0, 0, 0);
+
+    // Colony 1 (cyan) — food trail in cyan/teal
+    const offscreen1 = getOrCreateOffscreen(trailCanvas1Ref);
+    const image1 = new ImageData(GRID_WIDTH, GRID_HEIGHT);
+
+    const food1 = colony1FoodRef.current;
+    const home1 = colony1HomeRef.current;
+    const foodAge1 = colony1FoodAgeRef.current;
+    const homeAge1 = colony1HomeAgeRef.current;
+
+    for (let i = 0; i < GRID_SIZE; i++) {
+      const ff = food1[i] > 0 ? clamp(1 - foodAge1[i] / ttl, 0, 1) : 0;
+      const hf = home1[i] > 0 ? clamp(1 - homeAge1[i] / ttl, 0, 1) : 0;
+      const fv = food1[i] * ff * intensity;
+      const hv = home1[i] * hf * intensity;
+      const fp = 1 - Math.exp(-fv / 90);
+      const hp = 1 - Math.exp(-hv / 80);
+      const cp = clamp(fp + hp, 0, 1);
+
+      if (cp <= 0.006) { image1.data[i * 4 + 3] = 0; continue; }
+
+      const heat = clamp(Math.log1p(fv + hv) / 7.25, 0, 1);
+      const fresh = clamp(Math.max(ff, hf), 0, 1);
+
+      // Cyan/teal palette for colony 1
+      image1.data[i * 4] = clamp(fp * 20 + hp * 10, 0, 255);
+      image1.data[i * 4 + 1] = clamp(160 + fp * 80 + heat * 50, 0, 255);
+      image1.data[i * 4 + 2] = clamp(180 + fp * 75 + hp * 55 + heat * 40, 0, 255);
+      const aBase = currentSettings.trailMode === "heatmap"
+        ? clamp(40 + heat * 220, 0, 245)
+        : clamp(24 + cp * 200, 0, 230);
+      image1.data[i * 4 + 3] = aBase * clamp(0.4 + fresh * 0.8, 0, 1);
+    }
+
+    const offCtx1 = offscreen1.getContext("2d");
+    if (offCtx1) offCtx1.putImageData(image1, 0, 0);
+
+    const bloom = currentSettings.trailBloom;
+
+    // Render colony 0 trails
+    ctx.save();
+    ctx.imageSmoothingEnabled = true;
+    ctx.globalCompositeOperation = "screen";
+
+    if (bloom > 0) {
+      ctx.filter = `blur(${bloom * 12}px)`;
+      ctx.globalAlpha = clamp(bloom * 0.32, 0, 0.7);
+      ctx.drawImage(offscreen0, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+      ctx.filter = `blur(${bloom * 5.5}px)`;
+      ctx.globalAlpha = clamp(bloom * 0.46, 0, 0.9);
+      ctx.drawImage(offscreen0, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+      ctx.filter = "none";
+      ctx.globalAlpha = 1;
+    }
+    ctx.drawImage(offscreen0, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+    ctx.restore();
+
+    // Render colony 1 trails
+    ctx.save();
+    ctx.imageSmoothingEnabled = true;
+    ctx.globalCompositeOperation = "screen";
+
+    if (bloom > 0) {
+      ctx.filter = `blur(${bloom * 12}px)`;
+      ctx.globalAlpha = clamp(bloom * 0.32, 0, 0.7);
+      ctx.drawImage(offscreen1, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+      ctx.filter = `blur(${bloom * 5.5}px)`;
+      ctx.globalAlpha = clamp(bloom * 0.46, 0, 0.9);
+      ctx.drawImage(offscreen1, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+      ctx.filter = "none";
+      ctx.globalAlpha = 1;
+    }
+    ctx.drawImage(offscreen1, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
     ctx.restore();
   }
 
@@ -1331,34 +1775,51 @@ export default function App() {
     }
   }
 
-  function drawNest(ctx: CanvasRenderingContext2D) {
-    const nest = nestRef.current;
-
+  function drawNestShape(
+    ctx: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    glowColor: string,
+    coreColor: string,
+    label: string
+  ) {
     ctx.beginPath();
-    ctx.fillStyle = "rgba(255, 185, 89, 0.18)";
-    ctx.arc(nest.x, nest.y, NEST_RADIUS + 16, 0, Math.PI * 2);
+    ctx.fillStyle = glowColor;
+    ctx.arc(x, y, NEST_RADIUS + 16, 0, Math.PI * 2);
     ctx.fill();
 
     ctx.beginPath();
-    ctx.fillStyle = "#c98735";
-    ctx.arc(nest.x, nest.y, NEST_RADIUS, 0, Math.PI * 2);
+    ctx.fillStyle = coreColor;
+    ctx.arc(x, y, NEST_RADIUS, 0, Math.PI * 2);
     ctx.fill();
 
     ctx.beginPath();
     ctx.fillStyle = "#2b1a0d";
-    ctx.arc(nest.x, nest.y, NEST_RADIUS * 0.58, 0, Math.PI * 2);
+    ctx.arc(x, y, NEST_RADIUS * 0.58, 0, Math.PI * 2);
     ctx.fill();
 
     ctx.beginPath();
     ctx.strokeStyle = "rgba(255,255,255,0.35)";
     ctx.lineWidth = 2;
-    ctx.arc(nest.x, nest.y, NEST_RADIUS + 2, 0, Math.PI * 2);
+    ctx.arc(x, y, NEST_RADIUS + 2, 0, Math.PI * 2);
     ctx.stroke();
 
     ctx.fillStyle = "#ffe4b5";
     ctx.font = "bold 11px system-ui";
     ctx.textAlign = "center";
-    ctx.fillText("Nest", nest.x, nest.y + NEST_RADIUS + 21);
+    ctx.fillText(label, x, y + NEST_RADIUS + 21);
+  }
+
+  function drawNest(ctx: CanvasRenderingContext2D) {
+    const nest = nestRef.current;
+    drawNestShape(ctx, nest.x, nest.y, "rgba(255,185,89,0.18)", "#c98735", "Nest");
+  }
+
+  function drawNestWars(ctx: CanvasRenderingContext2D) {
+    const nestA = nestARef.current;
+    const nestB = nestBRef.current;
+    drawNestShape(ctx, nestA.x, nestA.y, "rgba(255,179,71,0.22)", "#d4832a", "Colony A");
+    drawNestShape(ctx, nestB.x, nestB.y, "rgba(0,229,255,0.18)", "#0099bb", "Colony B");
   }
 
   function drawAnts(ctx: CanvasRenderingContext2D) {
@@ -1403,6 +1864,72 @@ export default function App() {
       ctx.stroke();
 
       if (ant.carryingFood) {
+        ctx.beginPath();
+        ctx.fillStyle = "#7ee787";
+        ctx.arc(-8.3, 0, 2.8, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      ctx.restore();
+    }
+  }
+
+  function drawAntsWars(ctx: CanvasRenderingContext2D) {
+    for (const ant of antsRef.current) {
+      ctx.save();
+      ctx.translate(ant.x, ant.y);
+      ctx.rotate(ant.angle);
+
+      // Colony 0 = amber/orange, Colony 1 = cyan
+      const isColony0 = ant.colony === 0;
+      const carrying = ant.carryingFood;
+
+      const bodyColor = isColony0
+        ? (carrying ? "#ffcc44" : "#ffb347")
+        : (carrying ? "#44eeff" : "#00e5ff");
+
+      const shadowColor = isColony0
+        ? "rgba(255,179,71,0.28)"
+        : "rgba(0,229,255,0.22)";
+
+      // Glow when carrying food
+      if (carrying) {
+        ctx.beginPath();
+        ctx.fillStyle = isColony0 ? "rgba(255,200,60,0.3)" : "rgba(0,229,255,0.28)";
+        ctx.arc(0, 0, 12, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      ctx.beginPath();
+      ctx.fillStyle = shadowColor;
+      ctx.ellipse(0, 0, 9, 4, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = bodyColor;
+
+      ctx.beginPath();
+      ctx.ellipse(-3.5, 0, 3.8, 2.4, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.ellipse(1.5, 0, 4.3, 2.5, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.ellipse(6.2, 0, 2.4, 2.1, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.strokeStyle = "rgba(255,255,255,0.32)";
+      ctx.lineWidth = 1;
+
+      ctx.beginPath();
+      ctx.moveTo(5.8, -1.1);
+      ctx.lineTo(8.9, -3.4);
+      ctx.moveTo(5.8, 1.1);
+      ctx.lineTo(8.9, 3.4);
+      ctx.stroke();
+
+      if (carrying) {
         ctx.beginPath();
         ctx.fillStyle = "#7ee787";
         ctx.arc(-8.3, 0, 2.8, 0, Math.PI * 2);
@@ -1519,61 +2046,121 @@ export default function App() {
     }
   }
 
+  const handleSavePng = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const dataUrl = canvas.toDataURL("image/png");
+    const link = document.createElement("a");
+    link.href = dataUrl;
+    link.download = `antlab-${Date.now()}.png`;
+    link.click();
+  }, []);
+
+  // Derived values for stats UI
+  const isWarsMode = settings.viewMode === "wars";
+  const totalAnts = stats.activeAnts;
+  const searchingPct = totalAnts > 0 ? (stats.searchingAnts / totalAnts) * 100 : 0;
+  const returningPct = totalAnts > 0 ? (stats.returningAnts / totalAnts) * 100 : 0;
+
+  // Mode accent color driven by CSS variable
+  const modeAccentMap: Record<ViewMode, string> = {
+    colony: "#7ee787",
+    visualizer: "#67b7ff",
+    science: "#ffcc44",
+    wars: "#ffb347",
+    nebula: "#e040fb",
+    bio: "#00e5ff"
+  };
+  const accent = modeAccentMap[settings.viewMode];
+
   return (
-    <main className="app">
+    <main className="app" style={{ "--mode-accent": accent } as React.CSSProperties}>
       <aside className="panel">
         <div className="titleBlock">
           <p className="eyebrow">Browser sandbox</p>
           <h1>AntLab</h1>
           <p>
-            A pheromone-trail ant colony simulator with colony, science, and generative trail art modes.
+            Pheromone-trail ant colony simulator with colony wars, science analysis, and generative art modes.
           </p>
         </div>
 
         <section className="section">
-          <h2>Mode</h2>
-          <div className="modeGrid">
+          <h2 className="sectionHeader">Mode</h2>
+          <div className="modeRow">
             <button
-              className={settings.viewMode === "colony" ? "active" : ""}
+              className={`modeCard${settings.viewMode === "colony" ? " active" : ""}`}
               onClick={() => applyMode("colony")}
             >
-              Colony
+              <span className="modeIcon">🐜</span>
+              <span className="modeName">Colony</span>
+              <span className="modeSubtitle">foraging sim</span>
             </button>
             <button
-              className={settings.viewMode === "visualizer" ? "active" : ""}
-              onClick={() => applyMode("visualizer")}
+              className={`modeCard${settings.viewMode === "wars" ? " active" : ""}`}
+              onClick={() => applyMode("wars")}
             >
-              Trail Art
+              <span className="modeIcon">⚔️</span>
+              <span className="modeName">Wars</span>
+              <span className="modeSubtitle">colony conflict</span>
             </button>
             <button
-              className={settings.viewMode === "science" ? "active" : ""}
+              className={`modeCard${settings.viewMode === "science" ? " active" : ""}`}
               onClick={() => applyMode("science")}
             >
-              Science
+              <span className="modeIcon">🔬</span>
+              <span className="modeName">Science</span>
+              <span className="modeSubtitle">analysis</span>
+            </button>
+          </div>
+          <div className="modeRow" style={{ marginTop: "0.5rem" }}>
+            <button
+              className={`modeCard${settings.viewMode === "visualizer" ? " active" : ""}`}
+              onClick={() => applyMode("visualizer")}
+            >
+              <span className="modeIcon">🌌</span>
+              <span className="modeName">Trail Art</span>
+              <span className="modeSubtitle">aurora trails</span>
+            </button>
+            <button
+              className={`modeCard${settings.viewMode === "nebula" ? " active" : ""}`}
+              onClick={() => applyMode("nebula")}
+            >
+              <span className="modeIcon">🔮</span>
+              <span className="modeName">Nebula</span>
+              <span className="modeSubtitle">cosmic drift</span>
+            </button>
+            <button
+              className={`modeCard${settings.viewMode === "bio" ? " active" : ""}`}
+              onClick={() => applyMode("bio")}
+            >
+              <span className="modeIcon">🌊</span>
+              <span className="modeName">Bioluminescence</span>
+              <span className="modeSubtitle">deep ocean</span>
             </button>
           </div>
         </section>
 
         <section className="section">
-          <h2>Tools</h2>
+          <h2 className="sectionHeader">Tools</h2>
           <div className="toolGrid">
             <button className={tool === "food" ? "active" : ""} onClick={() => setTool("food")}>
-              Food
+              🍃 Food
             </button>
             <button className={tool === "wall" ? "active" : ""} onClick={() => setTool("wall")}>
-              Wall
+              🧱 Wall
             </button>
             <button className={tool === "erase" ? "active" : ""} onClick={() => setTool("erase")}>
-              Erase
+              ✏️ Erase
             </button>
             <button className={tool === "nest" ? "active" : ""} onClick={() => setTool("nest")}>
-              Nest
+              🏠 Nest
             </button>
           </div>
         </section>
 
         <section className="section">
-          <h2>Simulation</h2>
+          <h2 className="sectionHeader">Simulation</h2>
 
           <Slider
             label="Ant count"
@@ -1637,7 +2224,7 @@ export default function App() {
         </section>
 
         <section className="section">
-          <h2>Visualization</h2>
+          <h2 className="sectionHeader">Visualization</h2>
 
           <label>
             Ant display
@@ -1692,6 +2279,8 @@ export default function App() {
               <option value="acid">Acid</option>
               <option value="ice">Ice</option>
               <option value="inferno">Inferno</option>
+              <option value="nebula">Nebula</option>
+              <option value="bio">Bioluminescence</option>
             </select>
           </label>
 
@@ -1746,7 +2335,7 @@ export default function App() {
                 }))
               }
             />
-            Hide food/nest in Trail Art
+            Hide food/nest in art modes
           </label>
 
           <label className="checkbox">
@@ -1760,7 +2349,7 @@ export default function App() {
                 }))
               }
             />
-            Hide walls in Trail Art
+            Hide walls in art modes
           </label>
 
           <label className="checkbox">
@@ -1807,7 +2396,7 @@ export default function App() {
         </section>
 
         <section className="section">
-          <h2>Food settings</h2>
+          <h2 className="sectionHeader">Food settings</h2>
 
           <Slider
             label="Food amount"
@@ -1832,17 +2421,20 @@ export default function App() {
 
         <section className="section actions">
           <button onClick={() => setIsPaused((value) => !value)}>
-            {isPaused ? "Play" : "Pause"}
+            {isPaused ? "▶ Play" : "⏸ Pause"}
           </button>
-          <button onClick={resetSimulation}>Reset</button>
-          <button onClick={clearTrails}>Clear trails</button>
-          <button onClick={clearWalls}>Clear walls</button>
-          <button onClick={seedDemo}>Demo setup</button>
-          <button onClick={generateMaze}>Random maze</button>
+          <button onClick={resetSimulation}>↺ Reset</button>
+          <button onClick={clearTrails}>✦ Clear trails</button>
+          <button onClick={clearWalls}>⬛ Clear walls</button>
+          <button onClick={seedDemo}>🎮 Demo setup</button>
+          <button onClick={generateMaze}>🌀 Random maze</button>
+          <button className="savePngBtn" onClick={handleSavePng}>
+            📷 Save PNG
+          </button>
         </section>
 
         <section className="section">
-          <h2>Stats</h2>
+          <h2 className="sectionHeader">Stats</h2>
           <div className="stats">
             <p>
               <span>Food collected</span>
@@ -1856,14 +2448,50 @@ export default function App() {
               <span>Active ants</span>
               <strong>{stats.activeAnts}</strong>
             </p>
-            <p>
-              <span>Searching</span>
-              <strong>{stats.searchingAnts}</strong>
-            </p>
-            <p>
-              <span>Returning</span>
-              <strong>{stats.returningAnts}</strong>
-            </p>
+
+            <div className="statBarGroup">
+              <div className="statBarLabel">
+                <span>Searching</span>
+                <strong>{stats.searchingAnts}</strong>
+              </div>
+              <div className="statBarTrack">
+                <div
+                  className="statBarFill searching"
+                  style={{ width: `${searchingPct.toFixed(1)}%` }}
+                />
+              </div>
+            </div>
+
+            <div className="statBarGroup">
+              <div className="statBarLabel">
+                <span>Returning</span>
+                <strong>{stats.returningAnts}</strong>
+              </div>
+              <div className="statBarTrack">
+                <div
+                  className="statBarFill returning"
+                  style={{ width: `${returningPct.toFixed(1)}%` }}
+                />
+              </div>
+            </div>
+
+            {isWarsMode && (
+              <>
+                <div className="colonyStats">
+                  <div className="colonyStatRow colonyA">
+                    <span className="colonyDot" />
+                    <span>Colony A</span>
+                    <strong>{stats.colony0Collected}</strong>
+                  </div>
+                  <div className="colonyStatRow colonyB">
+                    <span className="colonyDot" />
+                    <span>Colony B</span>
+                    <strong>{stats.colony1Collected}</strong>
+                  </div>
+                </div>
+              </>
+            )}
+
             <p>
               <span>Time elapsed</span>
               <strong>{formatTime(stats.elapsedSeconds)}</strong>
@@ -1889,6 +2517,16 @@ export default function App() {
             <span>
               <i className="dot homeTrail" /> Home trail
             </span>
+            {isWarsMode && (
+              <>
+                <span>
+                  <i className="dot colonyADot" /> Colony A
+                </span>
+                <span>
+                  <i className="dot colonyBDot" /> Colony B
+                </span>
+              </>
+            )}
             <span>
               <i className="dot wallDot" /> Wall
             </span>
