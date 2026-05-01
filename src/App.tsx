@@ -28,6 +28,8 @@ type Ant = {
   x: number;
   y: number;
   angle: number;
+  vx: number;
+  vy: number;
   speed: number;
   turnRate: number;
   exploration: number;
@@ -157,11 +159,15 @@ function formatTime(seconds: number) {
 }
 
 function createAnt(nestX: number, nestY: number, colony: 0 | 1 = 0): Ant {
+  const angle = randomBetween(0, Math.PI * 2);
+  const speed = randomBetween(0.82, 1.34);
   return {
     x: nestX + randomBetween(-NEST_RADIUS * 0.45, NEST_RADIUS * 0.45),
     y: nestY + randomBetween(-NEST_RADIUS * 0.45, NEST_RADIUS * 0.45),
-    angle: randomBetween(0, Math.PI * 2),
-    speed: randomBetween(0.82, 1.34),
+    angle,
+    vx: Math.cos(angle) * speed,
+    vy: Math.sin(angle) * speed,
+    speed,
     turnRate: randomBetween(0.045, 0.105),
     exploration: randomBetween(0.55, 1.35),
     pheromoneSensitivity: randomBetween(0.75, 1.75),
@@ -812,7 +818,7 @@ export default function App() {
     { r: 80, g: 180, b: 255 }    // species 2: blue
   ] as const;
 
-  // Sample the combined slime trail for a species at a sensor position
+  // Sample slime trail at sensor point — own species attracted, others repelled (SebLague speciesMask * 2 - 1)
   function sampleSlimeTrail(x: number, y: number, angle: number, distance: number, species: 0 | 1 | 2): number {
     const sx = x + Math.cos(angle) * distance;
     const sy = y + Math.sin(angle) * distance;
@@ -821,14 +827,19 @@ export default function App() {
 
     const cgx = clamp(Math.floor(sx / GRID_SCALE), 1, GRID_WIDTH - 2);
     const cgy = clamp(Math.floor(sy / GRID_SCALE), 1, GRID_HEIGHT - 2);
-    const trail = slimeTrailRef.current[species];
+    const numSpecies = settingsRef.current.slimeSpecies;
 
-    // Sum 3×3 area — matches SebLague's sensorSize sampling
     let total = 0;
-    for (let dy = -1; dy <= 1; dy++) {
-      for (let dx = -1; dx <= 1; dx++) {
-        total += trail[gridIndex(cgx + dx, cgy + dy)];
+    for (let sp = 0; sp < numSpecies; sp++) {
+      const trail = slimeTrailRef.current[sp];
+      let sum = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          sum += trail[gridIndex(cgx + dx, cgy + dy)];
+        }
       }
+      // own species = +1 (attract), other species = -1 (repel)
+      total += (sp === species ? 1 : -1) * sum;
     }
     return total;
   }
@@ -841,29 +852,33 @@ export default function App() {
     const speed = s.antSpeed;
     const trail = slimeTrailRef.current[agent.species];
 
-    // Sense: sample agent's own species trail at three positions
+    // Sense all three directions (inter-species weighting done in sampleSlimeTrail)
+    const sF = sampleSlimeTrail(agent.x, agent.y, agent.angle, sensorDist, agent.species);
     const sL = sampleSlimeTrail(agent.x, agent.y, agent.angle - sensorAngle, sensorDist, agent.species);
-    const sC = sampleSlimeTrail(agent.x, agent.y, agent.angle, sensorDist, agent.species);
     const sR = sampleSlimeTrail(agent.x, agent.y, agent.angle + sensorAngle, sensorDist, agent.species);
 
-    // SebLague binary turning rules (from compute shader)
-    if (sC >= sL && sC >= sR) {
-      // Forward is strongest — continue with tiny jitter
-      agent.angle += (Math.random() - 0.5) * 0.06;
-    } else if (sL > sR) {
-      agent.angle -= turnSpeed;
+    // SebLague exact turning logic: randomSteerStrength per frame (scaleToRange01 hash)
+    const rnd = Math.random();
+
+    if (sF > sL && sF > sR) {
+      // Forward is strongest — continue straight (no turn)
+    } else if (sF < sL && sF < sR) {
+      // Both sides stronger — random direction (full ±1 range)
+      agent.angle += (rnd - 0.5) * 2.0 * turnSpeed;
     } else if (sR > sL) {
-      agent.angle += turnSpeed;
-    } else {
-      // Perfectly tied — random turn
-      agent.angle += (Math.random() < 0.5 ? -1 : 1) * turnSpeed;
+      // Right is stronger — turn right (randomised amount [0, turnSpeed])
+      agent.angle += rnd * turnSpeed;
+    } else if (sL > sR) {
+      // Left is stronger — turn left
+      agent.angle -= rnd * turnSpeed;
     }
+    // Exactly equal left/right: no turn (SebLague: else branch is empty)
 
     // Move forward
     const newX = agent.x + Math.cos(agent.angle) * speed;
     const newY = agent.y + Math.sin(agent.angle) * speed;
 
-    // Boundary: reflect and randomize angle to avoid edge pileup
+    // Boundary: randomise angle so agents don't pile up at edges
     if (newX < 2 || newX >= WORLD_WIDTH - 2 || newY < 2 || newY >= WORLD_HEIGHT - 2) {
       agent.x = clamp(newX, 2, WORLD_WIDTH - 2);
       agent.y = clamp(newY, 2, WORLD_HEIGHT - 2);
@@ -873,7 +888,7 @@ export default function App() {
       agent.y = newY;
     }
 
-    // Deposit trail at new position (agent's own species map)
+    // Deposit: clamp to MAX_PHEROMONE (SebLague: min(1, old + weight * dt))
     const gx = clamp(Math.floor(agent.x / GRID_SCALE), 0, GRID_WIDTH - 1);
     const gy = clamp(Math.floor(agent.y / GRID_SCALE), 0, GRID_HEIGHT - 1);
     const gi = gridIndex(gx, gy);
@@ -884,16 +899,24 @@ export default function App() {
     const s = settingsRef.current;
     const trails = slimeTrailRef.current;
     const scratch = slimeScratchRef.current;
-    const evap = s.evaporation;
     const numSpecies = s.slimeSpecies;
+
+    // SebLague exact formula:
+    //   diffuseWeight = saturate(diffuseRate * deltaTime)
+    //   blended = original*(1-diffuseWeight) + blurred*diffuseWeight
+    //   result = max(0, blended - decayRate * deltaTime)
+    // diffuseRate=4 at 60fps → diffuseWeight≈0.067 (subtle spread per frame)
+    // decayRate scaled to our pheromone range: (1-evaporation)*MAX_PHEROMONE*3
+    const diffuseWeight = Math.min(1, 4.0 / 60);
+    const decayPerFrame = (1 - s.evaporation) * MAX_PHEROMONE * 3.2;
 
     for (let sp = 0; sp < numSpecies; sp++) {
       const trail = trails[sp];
 
-      // Full 3×3 mean blur (diffuse) + evaporate — this is the SebLague diffuseMap kernel
       for (let y = 1; y < GRID_HEIGHT - 1; y++) {
         for (let x = 1; x < GRID_WIDTH - 1; x++) {
           const i = gridIndex(x, y);
+          // 3×3 mean blur (SebLague's diffuseMap kernel)
           let sum = 0;
           for (let dy = -1; dy <= 1; dy++) {
             for (let dx = -1; dx <= 1; dx++) {
@@ -901,9 +924,10 @@ export default function App() {
             }
           }
           const blurred = sum / 9;
-          // SebLague: max(0, blurredCol - decayRate * deltaTime)
-          // We blend original+blurred then evaporate
-          scratch[i] = Math.max(0, (trail[i] * 0.35 + blurred * 0.65) * evap);
+          // Blend: weighted mix of original and blurred
+          const blended = trail[i] * (1 - diffuseWeight) + blurred * diffuseWeight;
+          // Subtractive decay — weak trails vanish cleanly (no slow fade to near-zero)
+          scratch[i] = Math.max(0, blended - decayPerFrame);
         }
       }
       trail.set(scratch);
@@ -914,44 +938,53 @@ export default function App() {
     const s = settingsRef.current;
     const trails = slimeTrailRef.current;
     const numSpecies = s.slimeSpecies;
-    const offscreen = getOrCreateOffscreen(trailCanvasRef);
-    const image = new ImageData(GRID_WIDTH, GRID_HEIGHT);
+    const offscreen = getOrCreateOffscreen(trailCanvasRef, WORLD_WIDTH, WORLD_HEIGHT);
+    const image = new ImageData(WORLD_WIDTH, WORLD_HEIGHT);
 
-    for (let i = 0; i < GRID_SIZE; i++) {
-      let r = 0, g = 0, b = 0, maxVal = 0;
+    // Render at full canvas resolution — nearest-neighbour grid lookup
+    for (let py = 0; py < WORLD_HEIGHT; py++) {
+      const gy = py >> 2;
+      const gyBase = gy * GRID_WIDTH;
+      for (let px = 0; px < WORLD_WIDTH; px++) {
+        const gi = gyBase + (px >> 2);
 
-      for (let sp = 0; sp < numSpecies; sp++) {
-        const value = trails[sp][i];
-        if (value <= 0) continue;
-        const normalized = 1 - Math.exp(-value / 110);
-        const heat = clamp(Math.log1p(value) / 7.5, 0, 1);
-        maxVal = Math.max(maxVal, value);
+        let r = 0, g = 0, b = 0, maxVal = 0;
 
-        if (numSpecies === 1) {
-          // Single species: use the selected palette for rich color
-          const color = paletteColor(s.trailPalette, normalized, normalized * 0.5, normalized, heat, normalized);
-          r = Math.max(r, color.r);
-          g = Math.max(g, color.g);
-          b = Math.max(b, color.b);
-        } else {
-          // Multi-species: each species has its own color, additive blend
-          const sc = SLIME_SPECIES_COLORS[sp];
-          r = clamp(r + sc.r * normalized * heat * 1.8, 0, 255);
-          g = clamp(g + sc.g * normalized * heat * 1.8, 0, 255);
-          b = clamp(b + sc.b * normalized * heat * 1.8, 0, 255);
+        for (let sp = 0; sp < numSpecies; sp++) {
+          const value = trails[sp][gi];
+          if (value <= 0) continue;
+          if (value > maxVal) maxVal = value;
+
+          // Steeper curve for sharper bright trails (SebLague-style crisp lines)
+          const t = Math.min(1, value / MAX_PHEROMONE);
+          const bright = t * t * (3 - 2 * t); // smoothstep → brighter core
+          const heat = Math.min(1, value / (MAX_PHEROMONE * 0.4));
+
+          if (numSpecies === 1) {
+            // Single species: palette-based coloring
+            const norm = Math.min(1, value / (MAX_PHEROMONE * 0.55));
+            const color = paletteColor(s.trailPalette, norm, norm * 0.45, norm, heat, bright);
+            if (color.r > r) r = color.r;
+            if (color.g > g) g = color.g;
+            if (color.b > b) b = color.b;
+          } else {
+            // Multi-species: vivid species colors, additive blend
+            const sc = SLIME_SPECIES_COLORS[sp];
+            r = Math.min(255, r + sc.r * bright * (1 + heat));
+            g = Math.min(255, g + sc.g * bright * (1 + heat));
+            b = Math.min(255, b + sc.b * bright * (1 + heat));
+          }
         }
-      }
 
-      if (maxVal <= 0.5) {
-        image.data[i * 4 + 3] = 0;
-        continue;
-      }
+        if (maxVal <= 0.5) continue;
 
-      const normalized = 1 - Math.exp(-maxVal / 110);
-      image.data[i * 4]     = r;
-      image.data[i * 4 + 1] = g;
-      image.data[i * 4 + 2] = b;
-      image.data[i * 4 + 3] = clamp(30 + normalized * 225, 0, 245);
+        const alpha = Math.min(245, 20 + (Math.min(1, maxVal / (MAX_PHEROMONE * 0.3))) * 230);
+        const p = (py * WORLD_WIDTH + px) * 4;
+        image.data[p]     = r > 255 ? 255 : r;
+        image.data[p + 1] = g > 255 ? 255 : g;
+        image.data[p + 2] = b > 255 ? 255 : b;
+        image.data[p + 3] = alpha;
+      }
     }
 
     renderTrailCanvas(ctx, offscreen, image, "screen");
@@ -1159,13 +1192,36 @@ export default function App() {
     const oldX = ant.x;
     const oldY = ant.y;
 
-    const speed =
+    const maxSpeed =
       ant.speed *
       currentSettings.antSpeed *
       (ant.state === "returning" ? 1.06 : 1);
 
-    ant.x += Math.cos(ant.angle) * speed;
-    ant.y += Math.sin(ant.angle) * speed;
+    // Velocity-based movement (SebLague SteerTowards): smooth curved paths via acceleration
+    const targetVx = Math.cos(ant.angle) * maxSpeed;
+    const targetVy = Math.sin(ant.angle) * maxSpeed;
+    const steerX = targetVx - ant.vx;
+    const steerY = targetVy - ant.vy;
+    const steerLen = Math.hypot(steerX, steerY);
+    const maxSteer = maxSpeed * 0.28; // max steering force per frame
+    if (steerLen > maxSteer) {
+      ant.vx += (steerX / steerLen) * maxSteer;
+      ant.vy += (steerY / steerLen) * maxSteer;
+    } else {
+      ant.vx += steerX;
+      ant.vy += steerY;
+    }
+    // Clamp to max speed
+    const vLen = Math.hypot(ant.vx, ant.vy);
+    if (vLen > maxSpeed) {
+      ant.vx = (ant.vx / vLen) * maxSpeed;
+      ant.vy = (ant.vy / vLen) * maxSpeed;
+    }
+    // Derive facing angle from velocity for next frame's sensing
+    if (vLen > 0.001) ant.angle = Math.atan2(ant.vy, ant.vx);
+
+    ant.x += ant.vx;
+    ant.y += ant.vy;
 
     let collided = false;
     const margin = 12;
@@ -1202,8 +1258,8 @@ export default function App() {
         let clearSteps = 0;
 
         for (let s = 1; s <= 4; s++) {
-          const tx = ant.x + Math.cos(testAngle) * speed * s;
-          const ty = ant.y + Math.sin(testAngle) * speed * s;
+          const tx = ant.x + Math.cos(testAngle) * maxSpeed * s;
+          const ty = ant.y + Math.sin(testAngle) * maxSpeed * s;
           if (!isWallAt(tx, ty)) clearSteps++;
         }
 
@@ -1714,45 +1770,48 @@ export default function App() {
     foodAge: Uint16Array,
     homeAge: Uint16Array,
     palette: TrailPalette
-  ) {
+  ): ImageData {
     const currentSettings = settingsRef.current;
-    const image = new ImageData(GRID_WIDTH, GRID_HEIGHT);
+    // Render at full canvas resolution — nearest-neighbour grid lookup, zero upscale blur
+    const image = new ImageData(WORLD_WIDTH, WORLD_HEIGHT);
+    const ttl = currentSettings.pheromoneTtl;
+    const intensity = currentSettings.trailIntensity;
+    const isHeatmap = currentSettings.trailMode === "heatmap";
 
-    for (let i = 0; i < GRID_SIZE; i++) {
-      const foodFreshness =
-        foodMap[i] > 0 ? clamp(1 - foodAge[i] / currentSettings.pheromoneTtl, 0, 1) : 0;
+    for (let py = 0; py < WORLD_HEIGHT; py++) {
+      const gy = py >> 2; // Math.floor(py / GRID_SCALE)
+      const gyBase = gy * GRID_WIDTH;
+      for (let px = 0; px < WORLD_WIDTH; px++) {
+        const gi = gyBase + (px >> 2); // Math.floor(px / GRID_SCALE)
+        const fRaw = foodMap[gi];
+        const hRaw = homeMap[gi];
+        if (fRaw < 0.1 && hRaw < 0.1) continue;
 
-      const homeFreshness =
-        homeMap[i] > 0 ? clamp(1 - homeAge[i] / currentSettings.pheromoneTtl, 0, 1) : 0;
+        const foodFreshness = fRaw > 0 ? (1 - foodAge[gi] / ttl > 0 ? 1 - foodAge[gi] / ttl : 0) : 0;
+        const homeFreshness = hRaw > 0 ? (1 - homeAge[gi] / ttl > 0 ? 1 - homeAge[gi] / ttl : 0) : 0;
+        const foodValue = fRaw * foodFreshness * intensity;
+        const homeValue = hRaw * homeFreshness * intensity;
+        const foodPower = 1 - Math.exp(-foodValue / 90);
+        const homePower = 1 - Math.exp(-homeValue / 80);
+        const combinedPower = foodPower + homePower > 1 ? 1 : foodPower + homePower;
 
-      const foodValue = foodMap[i] * foodFreshness * currentSettings.trailIntensity;
-      const homeValue = homeMap[i] * homeFreshness * currentSettings.trailIntensity;
+        if (combinedPower <= 0.006) continue;
 
-      const foodPower = 1 - Math.exp(-foodValue / 90);
-      const homePower = 1 - Math.exp(-homeValue / 80);
-      const combinedPower = clamp(foodPower + homePower, 0, 1);
+        const heat = Math.min(1, Math.log1p(foodValue + homeValue) / 7.25);
+        const freshness = foodFreshness > homeFreshness ? foodFreshness : homeFreshness;
 
-      const p = i * 4;
+        const color = paletteColor(palette, foodPower, homePower, combinedPower, heat, freshness);
+        const alphaBase = isHeatmap
+          ? (40 + heat * 220 > 245 ? 245 : 40 + heat * 220)
+          : (24 + combinedPower * 200 > 230 ? 230 : 24 + combinedPower * 200);
+        const alpha = alphaBase * (0.4 + freshness * 0.8 > 1 ? 1 : 0.4 + freshness * 0.8);
 
-      if (combinedPower <= 0.006) {
-        image.data[p + 3] = 0;
-        continue;
+        const p = (py * WORLD_WIDTH + px) * 4;
+        image.data[p]     = color.r;
+        image.data[p + 1] = color.g;
+        image.data[p + 2] = color.b;
+        image.data[p + 3] = alpha > 245 ? 245 : alpha;
       }
-
-      const heat = clamp(Math.log1p(foodValue + homeValue) / 7.25, 0, 1);
-      const freshness = clamp(Math.max(foodFreshness, homeFreshness), 0, 1);
-
-      const color = paletteColor(palette, foodPower, homePower, combinedPower, heat, freshness);
-
-      const alphaBase =
-        currentSettings.trailMode === "heatmap"
-          ? clamp(40 + heat * 220, 0, 245)
-          : clamp(24 + combinedPower * 200, 0, 230);
-
-      image.data[p] = color.r;
-      image.data[p + 1] = color.g;
-      image.data[p + 2] = color.b;
-      image.data[p + 3] = alphaBase * clamp(0.4 + freshness * 0.8, 0, 1);
     }
 
     return image;
@@ -1796,44 +1855,44 @@ export default function App() {
     offCtx.putImageData(finalImage, 0, 0);
 
     ctx.save();
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = "high";
     ctx.globalCompositeOperation = compositeOp;
 
     if (currentSettings.trailBloom > 0) {
       const bloom = currentSettings.trailBloom;
 
-      // Pass 1: wide corona glow
-      ctx.filter = `blur(${bloom * 18}px)`;
-      ctx.globalAlpha = clamp(bloom * 0.16, 0, 0.5);
-      ctx.drawImage(offscreen, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+      // Bloom at canvas native resolution — no drawImage scaling needed (1:1)
+      // Radii are in CSS pixels, so scale stays the same regardless of trail resolution
+      ctx.filter = `blur(${bloom * 12}px)`;
+      ctx.globalAlpha = clamp(bloom * 0.18, 0, 0.55);
+      ctx.drawImage(offscreen, 0, 0);
 
-      // Pass 2: medium halo
-      ctx.filter = `blur(${bloom * 9}px)`;
-      ctx.globalAlpha = clamp(bloom * 0.26, 0, 0.68);
-      ctx.drawImage(offscreen, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+      ctx.filter = `blur(${bloom * 5}px)`;
+      ctx.globalAlpha = clamp(bloom * 0.32, 0, 0.75);
+      ctx.drawImage(offscreen, 0, 0);
 
-      // Pass 3: tight inner glow
-      ctx.filter = `blur(${bloom * 4}px)`;
-      ctx.globalAlpha = clamp(bloom * 0.44, 0, 0.88);
-      ctx.drawImage(offscreen, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+      ctx.filter = `blur(${bloom * 2}px)`;
+      ctx.globalAlpha = clamp(bloom * 0.55, 0, 0.92);
+      ctx.drawImage(offscreen, 0, 0);
 
       ctx.filter = "none";
       ctx.globalAlpha = 1;
     }
 
-    // Sharp core pass
-    ctx.drawImage(offscreen, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+    // Crisp core pass — no scaling, offscreen and ctx are same pixel dimensions
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(offscreen, 0, 0);
     ctx.restore();
   }
 
   function getOrCreateOffscreen(
-    ref: React.MutableRefObject<HTMLCanvasElement | null>
+    ref: React.MutableRefObject<HTMLCanvasElement | null>,
+    width: number = WORLD_WIDTH,
+    height: number = WORLD_HEIGHT
   ): HTMLCanvasElement {
-    if (!ref.current) {
+    if (!ref.current || ref.current.width !== width || ref.current.height !== height) {
       const c = document.createElement("canvas");
-      c.width = GRID_WIDTH;
-      c.height = GRID_HEIGHT;
+      c.width = width;
+      c.height = height;
       ref.current = c;
     }
     return ref.current;
@@ -1841,7 +1900,7 @@ export default function App() {
 
   function drawPheromones(ctx: CanvasRenderingContext2D) {
     const currentSettings = settingsRef.current;
-    const offscreen = getOrCreateOffscreen(trailCanvasRef);
+    const offscreen = getOrCreateOffscreen(trailCanvasRef, WORLD_WIDTH, WORLD_HEIGHT);
 
     const image = buildTrailImage(
       foodPheromoneRef.current,
@@ -1856,118 +1915,98 @@ export default function App() {
 
   function drawPheromonesWars(ctx: CanvasRenderingContext2D) {
     const currentSettings = settingsRef.current;
-
-    // Colony 0 (amber) — food trail rendered in warm orange/amber
-    const offscreen0 = getOrCreateOffscreen(trailCanvas0Ref);
-    const image0 = new ImageData(GRID_WIDTH, GRID_HEIGHT);
+    const ttl = currentSettings.pheromoneTtl;
+    const intensity = currentSettings.trailIntensity;
+    const bloom = currentSettings.trailBloom;
+    const isHeatmap = currentSettings.trailMode === "heatmap";
 
     const food0 = colony0FoodRef.current;
     const home0 = colony0HomeRef.current;
     const foodAge0 = colony0FoodAgeRef.current;
     const homeAge0 = colony0HomeAgeRef.current;
-    const ttl = currentSettings.pheromoneTtl;
-    const intensity = currentSettings.trailIntensity;
-
-    for (let i = 0; i < GRID_SIZE; i++) {
-      const ff = food0[i] > 0 ? clamp(1 - foodAge0[i] / ttl, 0, 1) : 0;
-      const hf = home0[i] > 0 ? clamp(1 - homeAge0[i] / ttl, 0, 1) : 0;
-      const fv = food0[i] * ff * intensity;
-      const hv = home0[i] * hf * intensity;
-      const fp = 1 - Math.exp(-fv / 90);
-      const hp = 1 - Math.exp(-hv / 80);
-      const cp = clamp(fp + hp, 0, 1);
-
-      if (cp <= 0.006) { image0.data[i * 4 + 3] = 0; continue; }
-
-      const heat = clamp(Math.log1p(fv + hv) / 7.25, 0, 1);
-      const fresh = clamp(Math.max(ff, hf), 0, 1);
-
-      // Amber/orange palette for colony 0
-      image0.data[i * 4] = clamp(180 + fp * 75 + heat * 60, 0, 255);
-      image0.data[i * 4 + 1] = clamp(90 + fp * 100 + hp * 80 + heat * 40, 0, 255);
-      image0.data[i * 4 + 2] = clamp(fp * 30 + hp * 20, 0, 255);
-      const aBase = currentSettings.trailMode === "heatmap"
-        ? clamp(40 + heat * 220, 0, 245)
-        : clamp(24 + cp * 200, 0, 230);
-      image0.data[i * 4 + 3] = aBase * clamp(0.4 + fresh * 0.8, 0, 1);
-    }
-
-    const offCtx0 = offscreen0.getContext("2d");
-    if (offCtx0) offCtx0.putImageData(image0, 0, 0);
-
-    // Colony 1 (cyan) — food trail in cyan/teal
-    const offscreen1 = getOrCreateOffscreen(trailCanvas1Ref);
-    const image1 = new ImageData(GRID_WIDTH, GRID_HEIGHT);
-
     const food1 = colony1FoodRef.current;
     const home1 = colony1HomeRef.current;
     const foodAge1 = colony1FoodAgeRef.current;
     const homeAge1 = colony1HomeAgeRef.current;
 
-    for (let i = 0; i < GRID_SIZE; i++) {
-      const ff = food1[i] > 0 ? clamp(1 - foodAge1[i] / ttl, 0, 1) : 0;
-      const hf = home1[i] > 0 ? clamp(1 - homeAge1[i] / ttl, 0, 1) : 0;
-      const fv = food1[i] * ff * intensity;
-      const hv = home1[i] * hf * intensity;
-      const fp = 1 - Math.exp(-fv / 90);
-      const hp = 1 - Math.exp(-hv / 80);
-      const cp = clamp(fp + hp, 0, 1);
+    // Build both colony images at full canvas resolution (nearest-neighbour lookup)
+    const offscreen0 = getOrCreateOffscreen(trailCanvas0Ref, WORLD_WIDTH, WORLD_HEIGHT);
+    const offscreen1 = getOrCreateOffscreen(trailCanvas1Ref, WORLD_WIDTH, WORLD_HEIGHT);
+    const image0 = new ImageData(WORLD_WIDTH, WORLD_HEIGHT);
+    const image1 = new ImageData(WORLD_WIDTH, WORLD_HEIGHT);
 
-      if (cp <= 0.006) { image1.data[i * 4 + 3] = 0; continue; }
+    for (let py = 0; py < WORLD_HEIGHT; py++) {
+      const gy = py >> 2;
+      const gyBase = gy * GRID_WIDTH;
+      for (let px = 0; px < WORLD_WIDTH; px++) {
+        const gi = gyBase + (px >> 2);
+        const p = (py * WORLD_WIDTH + px) * 4;
 
-      const heat = clamp(Math.log1p(fv + hv) / 7.25, 0, 1);
-      const fresh = clamp(Math.max(ff, hf), 0, 1);
+        // Colony 0 (amber)
+        const f0 = food0[gi], h0 = home0[gi];
+        if (f0 >= 0.1 || h0 >= 0.1) {
+          const ff0 = f0 > 0 ? (1 - foodAge0[gi] / ttl > 0 ? 1 - foodAge0[gi] / ttl : 0) : 0;
+          const hf0 = h0 > 0 ? (1 - homeAge0[gi] / ttl > 0 ? 1 - homeAge0[gi] / ttl : 0) : 0;
+          const fv0 = f0 * ff0 * intensity, hv0 = h0 * hf0 * intensity;
+          const fp0 = 1 - Math.exp(-fv0 / 90), hp0 = 1 - Math.exp(-hv0 / 80);
+          const cp0 = fp0 + hp0 > 1 ? 1 : fp0 + hp0;
+          if (cp0 > 0.006) {
+            const heat = Math.min(1, Math.log1p(fv0 + hv0) / 7.25);
+            const fresh = ff0 > hf0 ? ff0 : hf0;
+            const aBase = isHeatmap ? 40 + heat * 220 : 24 + cp0 * 200;
+            const alpha = (aBase > 245 ? 245 : aBase) * (0.4 + fresh * 0.8 > 1 ? 1 : 0.4 + fresh * 0.8);
+            image0.data[p]     = Math.min(255, 180 + fp0 * 75 + heat * 60);
+            image0.data[p + 1] = Math.min(255, 90 + fp0 * 100 + hp0 * 80 + heat * 40);
+            image0.data[p + 2] = Math.min(255, fp0 * 30 + hp0 * 20);
+            image0.data[p + 3] = alpha > 245 ? 245 : alpha;
+          }
+        }
 
-      // Cyan/teal palette for colony 1
-      image1.data[i * 4] = clamp(fp * 20 + hp * 10, 0, 255);
-      image1.data[i * 4 + 1] = clamp(160 + fp * 80 + heat * 50, 0, 255);
-      image1.data[i * 4 + 2] = clamp(180 + fp * 75 + hp * 55 + heat * 40, 0, 255);
-      const aBase = currentSettings.trailMode === "heatmap"
-        ? clamp(40 + heat * 220, 0, 245)
-        : clamp(24 + cp * 200, 0, 230);
-      image1.data[i * 4 + 3] = aBase * clamp(0.4 + fresh * 0.8, 0, 1);
+        // Colony 1 (cyan)
+        const f1 = food1[gi], h1 = home1[gi];
+        if (f1 >= 0.1 || h1 >= 0.1) {
+          const ff1 = f1 > 0 ? (1 - foodAge1[gi] / ttl > 0 ? 1 - foodAge1[gi] / ttl : 0) : 0;
+          const hf1 = h1 > 0 ? (1 - homeAge1[gi] / ttl > 0 ? 1 - homeAge1[gi] / ttl : 0) : 0;
+          const fv1 = f1 * ff1 * intensity, hv1 = h1 * hf1 * intensity;
+          const fp1 = 1 - Math.exp(-fv1 / 90), hp1 = 1 - Math.exp(-hv1 / 80);
+          const cp1 = fp1 + hp1 > 1 ? 1 : fp1 + hp1;
+          if (cp1 > 0.006) {
+            const heat = Math.min(1, Math.log1p(fv1 + hv1) / 7.25);
+            const fresh = ff1 > hf1 ? ff1 : hf1;
+            const aBase = isHeatmap ? 40 + heat * 220 : 24 + cp1 * 200;
+            const alpha = (aBase > 245 ? 245 : aBase) * (0.4 + fresh * 0.8 > 1 ? 1 : 0.4 + fresh * 0.8);
+            image1.data[p]     = Math.min(255, fp1 * 20 + hp1 * 10);
+            image1.data[p + 1] = Math.min(255, 160 + fp1 * 80 + heat * 50);
+            image1.data[p + 2] = Math.min(255, 180 + fp1 * 75 + hp1 * 55 + heat * 40);
+            image1.data[p + 3] = alpha > 245 ? 245 : alpha;
+          }
+        }
+      }
     }
 
+    const offCtx0 = offscreen0.getContext("2d");
+    if (offCtx0) offCtx0.putImageData(image0, 0, 0);
     const offCtx1 = offscreen1.getContext("2d");
     if (offCtx1) offCtx1.putImageData(image1, 0, 0);
 
-    const bloom = currentSettings.trailBloom;
-
-    // Render colony 0 trails
-    ctx.save();
-    ctx.imageSmoothingEnabled = true;
-    ctx.globalCompositeOperation = "screen";
-
-    if (bloom > 0) {
-      ctx.filter = `blur(${bloom * 12}px)`;
-      ctx.globalAlpha = clamp(bloom * 0.32, 0, 0.7);
-      ctx.drawImage(offscreen0, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
-      ctx.filter = `blur(${bloom * 5.5}px)`;
-      ctx.globalAlpha = clamp(bloom * 0.46, 0, 0.9);
-      ctx.drawImage(offscreen0, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
-      ctx.filter = "none";
-      ctx.globalAlpha = 1;
+    // Render both colonies — 1:1, no upscale
+    for (const offscreen of [offscreen0, offscreen1]) {
+      ctx.save();
+      ctx.globalCompositeOperation = "screen";
+      if (bloom > 0) {
+        ctx.filter = `blur(${bloom * 8}px)`;
+        ctx.globalAlpha = clamp(bloom * 0.28, 0, 0.65);
+        ctx.drawImage(offscreen, 0, 0);
+        ctx.filter = `blur(${bloom * 3}px)`;
+        ctx.globalAlpha = clamp(bloom * 0.45, 0, 0.85);
+        ctx.drawImage(offscreen, 0, 0);
+        ctx.filter = "none";
+        ctx.globalAlpha = 1;
+      }
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(offscreen, 0, 0);
+      ctx.restore();
     }
-    ctx.drawImage(offscreen0, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
-    ctx.restore();
-
-    // Render colony 1 trails
-    ctx.save();
-    ctx.imageSmoothingEnabled = true;
-    ctx.globalCompositeOperation = "screen";
-
-    if (bloom > 0) {
-      ctx.filter = `blur(${bloom * 12}px)`;
-      ctx.globalAlpha = clamp(bloom * 0.32, 0, 0.7);
-      ctx.drawImage(offscreen1, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
-      ctx.filter = `blur(${bloom * 5.5}px)`;
-      ctx.globalAlpha = clamp(bloom * 0.46, 0, 0.9);
-      ctx.drawImage(offscreen1, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
-      ctx.filter = "none";
-      ctx.globalAlpha = 1;
-    }
-    ctx.drawImage(offscreen1, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
-    ctx.restore();
   }
 
   function drawFlowField(ctx: CanvasRenderingContext2D) {
