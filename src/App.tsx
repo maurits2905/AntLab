@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback, type PointerEvent } from "react";
 
 type Tool = "food" | "wall" | "erase" | "nest";
-type ViewMode = "colony" | "visualizer" | "science" | "wars" | "nebula" | "bio";
+type ViewMode = "colony" | "visualizer" | "science" | "wars" | "nebula" | "bio" | "physarum";
 type TrailMode = "colored" | "heatmap" | "invisible";
 type TrailPalette =
   | "colony"
@@ -16,6 +16,13 @@ type TrailPalette =
   | "bio";
 type AntDisplay = "ants" | "particles" | "hidden";
 type AntState = "searching" | "returning";
+
+type SlimeAgent = {
+  x: number;
+  y: number;
+  angle: number;
+  species: 0 | 1 | 2;
+};
 
 type Ant = {
   x: number;
@@ -72,6 +79,9 @@ type Settings = {
   trailThreshold: number;
   hideWorldInVisualizer: boolean;
   hideWallsInVisualizer: boolean;
+  chromaticAberration: number;
+  slimeTurnSpeed: number;
+  slimeSpecies: 1 | 2 | 3;
 };
 
 type Stats = {
@@ -210,6 +220,15 @@ export default function App() {
 
   const wallsRef = useRef<Uint8Array>(new Uint8Array(GRID_SIZE));
 
+  // Physarum slime simulation — up to 3 species with separate trail maps
+  const slimeAgentsRef = useRef<SlimeAgent[]>([]);
+  const slimeTrailRef = useRef<Float32Array[]>([
+    new Float32Array(GRID_SIZE),
+    new Float32Array(GRID_SIZE),
+    new Float32Array(GRID_SIZE)
+  ]);
+  const slimeScratchRef = useRef<Float32Array>(new Float32Array(GRID_SIZE));
+
   // Nests: nestRef = single-colony nest, nestARef/nestBRef = wars-mode nests
   const nestRef = useRef({ x: WORLD_WIDTH * 0.38, y: WORLD_HEIGHT * 0.52 });
   const nestARef = useRef({ x: 300, y: 360 });
@@ -248,7 +267,10 @@ export default function App() {
     pheromoneTtl: 900,
     trailThreshold: 12,
     hideWorldInVisualizer: true,
-    hideWallsInVisualizer: true
+    hideWallsInVisualizer: true,
+    chromaticAberration: 0,
+    slimeTurnSpeed: 0.38,
+    slimeSpecies: 1
   });
 
   const settingsRef = useRef(settings);
@@ -292,7 +314,7 @@ export default function App() {
 
   useEffect(() => {
     const mode = settingsRef.current.viewMode;
-    if (mode !== "wars") {
+    if (mode !== "wars" && mode !== "physarum") {
       resizeAntPopulation(settings.antCount);
     }
   }, [settings.antCount]);
@@ -311,8 +333,17 @@ export default function App() {
   }
 
   function resetSimulation() {
+    const s = settingsRef.current;
+    const mode = s.viewMode;
+
+    if (mode === "physarum") {
+      clearSlimeTrail();
+      initSlimeAgents(s.antCount, s.slimeSpecies);
+      startedAtRef.current = performance.now();
+      return;
+    }
+
     const nest = nestRef.current;
-    const mode = settingsRef.current.viewMode;
 
     if (mode === "wars") {
       const nestA = nestARef.current;
@@ -323,7 +354,7 @@ export default function App() {
         ...makeAnts(countEach, nestB.x, nestB.y, 1)
       ];
     } else {
-      antsRef.current = makeAnts(settingsRef.current.antCount, nest.x, nest.y, 0);
+      antsRef.current = makeAnts(s.antCount, nest.x, nest.y, 0);
     }
 
     foodRef.current = [];
@@ -356,6 +387,38 @@ export default function App() {
     wallsRef.current = new Uint8Array(GRID_SIZE);
   }
 
+  function clearSlimeTrail() {
+    slimeTrailRef.current = [
+      new Float32Array(GRID_SIZE),
+      new Float32Array(GRID_SIZE),
+      new Float32Array(GRID_SIZE)
+    ];
+    slimeScratchRef.current = new Float32Array(GRID_SIZE);
+  }
+
+  function initSlimeAgents(count: number, species: 1 | 2 | 3) {
+    const agents: SlimeAgent[] = [];
+    const cx = WORLD_WIDTH / 2;
+    const cy = WORLD_HEIGHT / 2;
+
+    for (let i = 0; i < count; i++) {
+      const sp = species === 1 ? 0 : (i % species) as 0 | 1 | 2;
+      // Ring spawn facing inward — creates beautiful central convergence
+      const ringAngle = (i / count) * Math.PI * 2;
+      const ringR = Math.min(WORLD_WIDTH, WORLD_HEIGHT) * 0.32;
+      const px = cx + Math.cos(ringAngle) * ringR;
+      const py = cy + Math.sin(ringAngle) * ringR;
+      const faceInward = Math.atan2(cy - py, cx - px);
+      agents.push({
+        x: clamp(px, 20, WORLD_WIDTH - 20),
+        y: clamp(py, 20, WORLD_HEIGHT - 20),
+        angle: faceInward + randomBetween(-0.4, 0.4),
+        species: sp
+      });
+    }
+    slimeAgentsRef.current = agents;
+  }
+
   function applyMode(nextMode: ViewMode) {
     if (nextMode === "colony") {
       setSettings((current) => ({
@@ -377,7 +440,8 @@ export default function App() {
         pheromoneTtl: 900,
         trailThreshold: 12,
         hideWorldInVisualizer: false,
-        hideWallsInVisualizer: false
+        hideWallsInVisualizer: false,
+        chromaticAberration: 0
       }));
     }
 
@@ -403,7 +467,8 @@ export default function App() {
         pheromoneTtl: 720,
         trailThreshold: 22,
         hideWorldInVisualizer: true,
-        hideWallsInVisualizer: true
+        hideWallsInVisualizer: true,
+        chromaticAberration: 0.5
       }));
     }
 
@@ -427,7 +492,8 @@ export default function App() {
         pheromoneTtl: 780,
         trailThreshold: 12,
         hideWorldInVisualizer: false,
-        hideWallsInVisualizer: false
+        hideWallsInVisualizer: false,
+        chromaticAberration: 0.3
       }));
     }
 
@@ -472,7 +538,8 @@ export default function App() {
         pheromoneTtl: 900,
         trailThreshold: 12,
         hideWorldInVisualizer: false,
-        hideWallsInVisualizer: false
+        hideWallsInVisualizer: false,
+        chromaticAberration: 0
       }));
     }
 
@@ -498,7 +565,8 @@ export default function App() {
         pheromoneTtl: 1200,
         trailThreshold: 18,
         hideWorldInVisualizer: true,
-        hideWallsInVisualizer: true
+        hideWallsInVisualizer: true,
+        chromaticAberration: 1.8
       }));
     }
 
@@ -524,7 +592,38 @@ export default function App() {
         pheromoneTtl: 1500,
         trailThreshold: 16,
         hideWorldInVisualizer: true,
-        hideWallsInVisualizer: true
+        hideWallsInVisualizer: true,
+        chromaticAberration: 1.2
+      }));
+    }
+
+    if (nextMode === "physarum") {
+      clearSlimeTrail();
+      initSlimeAgents(1400, settingsRef.current.slimeSpecies);
+
+      setSettings((current) => ({
+        ...current,
+        viewMode: "physarum",
+        antCount: 1400,
+        antSpeed: 1.1,
+        evaporation: 0.981,
+        sensorDistance: 22,
+        sensorAngle: 0.42,
+        showSensors: false,
+        showFlowField: false,
+        showAgeContours: false,
+        antDisplay: "hidden",
+        trailMode: "heatmap",
+        trailPalette: "aurora",
+        trailIntensity: 6.0,
+        trailBloom: 1.8,
+        pheromoneTtl: 9999,
+        trailThreshold: 0,
+        hideWorldInVisualizer: true,
+        hideWallsInVisualizer: true,
+        chromaticAberration: 0.7,
+        slimeTurnSpeed: 0.38,
+        slimeSpecies: 1
       }));
     }
   }
@@ -678,6 +777,7 @@ export default function App() {
     return raw * freshness;
   }
 
+  // SebLague-style: sample pheromones in a small circle around the sensor point
   function smellLayer(
     map: Float32Array,
     ageMap: Uint16Array,
@@ -692,8 +792,169 @@ export default function App() {
     if (sx < 0 || sy < 0 || sx >= WORLD_WIDTH || sy >= WORLD_HEIGHT) return 0;
     if (isWallAt(sx, sy)) return 0;
 
-    const index = gridIndexFromWorld(sx, sy);
-    return layerValue(map, ageMap, index);
+    const cgx = clamp(Math.floor(sx / GRID_SCALE), 1, GRID_WIDTH - 2);
+    const cgy = clamp(Math.floor(sy / GRID_SCALE), 1, GRID_HEIGHT - 2);
+
+    // Sum 3×3 area for smoother, more accurate trail sensing
+    let total = 0;
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        total += layerValue(map, ageMap, gridIndex(cgx + dx, cgy + dy));
+      }
+    }
+    return total / 9;
+  }
+
+  // Species color palettes for physarum multi-species
+  const SLIME_SPECIES_COLORS = [
+    { r: 80, g: 255, b: 160 },   // species 0: green
+    { r: 255, g: 120, b: 60 },   // species 1: orange
+    { r: 80, g: 180, b: 255 }    // species 2: blue
+  ] as const;
+
+  // Sample the combined slime trail for a species at a sensor position
+  function sampleSlimeTrail(x: number, y: number, angle: number, distance: number, species: 0 | 1 | 2): number {
+    const sx = x + Math.cos(angle) * distance;
+    const sy = y + Math.sin(angle) * distance;
+
+    if (sx < 0 || sy < 0 || sx >= WORLD_WIDTH || sy >= WORLD_HEIGHT) return 0;
+
+    const cgx = clamp(Math.floor(sx / GRID_SCALE), 1, GRID_WIDTH - 2);
+    const cgy = clamp(Math.floor(sy / GRID_SCALE), 1, GRID_HEIGHT - 2);
+    const trail = slimeTrailRef.current[species];
+
+    // Sum 3×3 area — matches SebLague's sensorSize sampling
+    let total = 0;
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        total += trail[gridIndex(cgx + dx, cgy + dy)];
+      }
+    }
+    return total;
+  }
+
+  function updateSlimeAgent(agent: SlimeAgent) {
+    const s = settingsRef.current;
+    const sensorDist = s.sensorDistance;
+    const sensorAngle = s.sensorAngle;
+    const turnSpeed = s.slimeTurnSpeed;
+    const speed = s.antSpeed;
+    const trail = slimeTrailRef.current[agent.species];
+
+    // Sense: sample agent's own species trail at three positions
+    const sL = sampleSlimeTrail(agent.x, agent.y, agent.angle - sensorAngle, sensorDist, agent.species);
+    const sC = sampleSlimeTrail(agent.x, agent.y, agent.angle, sensorDist, agent.species);
+    const sR = sampleSlimeTrail(agent.x, agent.y, agent.angle + sensorAngle, sensorDist, agent.species);
+
+    // SebLague binary turning rules (from compute shader)
+    if (sC >= sL && sC >= sR) {
+      // Forward is strongest — continue with tiny jitter
+      agent.angle += (Math.random() - 0.5) * 0.06;
+    } else if (sL > sR) {
+      agent.angle -= turnSpeed;
+    } else if (sR > sL) {
+      agent.angle += turnSpeed;
+    } else {
+      // Perfectly tied — random turn
+      agent.angle += (Math.random() < 0.5 ? -1 : 1) * turnSpeed;
+    }
+
+    // Move forward
+    const newX = agent.x + Math.cos(agent.angle) * speed;
+    const newY = agent.y + Math.sin(agent.angle) * speed;
+
+    // Boundary: reflect and randomize angle to avoid edge pileup
+    if (newX < 2 || newX >= WORLD_WIDTH - 2 || newY < 2 || newY >= WORLD_HEIGHT - 2) {
+      agent.x = clamp(newX, 2, WORLD_WIDTH - 2);
+      agent.y = clamp(newY, 2, WORLD_HEIGHT - 2);
+      agent.angle = randomBetween(0, Math.PI * 2);
+    } else {
+      agent.x = newX;
+      agent.y = newY;
+    }
+
+    // Deposit trail at new position (agent's own species map)
+    const gx = clamp(Math.floor(agent.x / GRID_SCALE), 0, GRID_WIDTH - 1);
+    const gy = clamp(Math.floor(agent.y / GRID_SCALE), 0, GRID_HEIGHT - 1);
+    const gi = gridIndex(gx, gy);
+    trail[gi] = Math.min(trail[gi] + s.trailIntensity, MAX_PHEROMONE);
+  }
+
+  function updateSlimePheromones() {
+    const s = settingsRef.current;
+    const trails = slimeTrailRef.current;
+    const scratch = slimeScratchRef.current;
+    const evap = s.evaporation;
+    const numSpecies = s.slimeSpecies;
+
+    for (let sp = 0; sp < numSpecies; sp++) {
+      const trail = trails[sp];
+
+      // Full 3×3 mean blur (diffuse) + evaporate — this is the SebLague diffuseMap kernel
+      for (let y = 1; y < GRID_HEIGHT - 1; y++) {
+        for (let x = 1; x < GRID_WIDTH - 1; x++) {
+          const i = gridIndex(x, y);
+          let sum = 0;
+          for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+              sum += trail[gridIndex(x + dx, y + dy)];
+            }
+          }
+          const blurred = sum / 9;
+          // SebLague: max(0, blurredCol - decayRate * deltaTime)
+          // We blend original+blurred then evaporate
+          scratch[i] = Math.max(0, (trail[i] * 0.35 + blurred * 0.65) * evap);
+        }
+      }
+      trail.set(scratch);
+    }
+  }
+
+  function drawSlimePheromones(ctx: CanvasRenderingContext2D) {
+    const s = settingsRef.current;
+    const trails = slimeTrailRef.current;
+    const numSpecies = s.slimeSpecies;
+    const offscreen = getOrCreateOffscreen(trailCanvasRef);
+    const image = new ImageData(GRID_WIDTH, GRID_HEIGHT);
+
+    for (let i = 0; i < GRID_SIZE; i++) {
+      let r = 0, g = 0, b = 0, maxVal = 0;
+
+      for (let sp = 0; sp < numSpecies; sp++) {
+        const value = trails[sp][i];
+        if (value <= 0) continue;
+        const normalized = 1 - Math.exp(-value / 110);
+        const heat = clamp(Math.log1p(value) / 7.5, 0, 1);
+        maxVal = Math.max(maxVal, value);
+
+        if (numSpecies === 1) {
+          // Single species: use the selected palette for rich color
+          const color = paletteColor(s.trailPalette, normalized, normalized * 0.5, normalized, heat, normalized);
+          r = Math.max(r, color.r);
+          g = Math.max(g, color.g);
+          b = Math.max(b, color.b);
+        } else {
+          // Multi-species: each species has its own color, additive blend
+          const sc = SLIME_SPECIES_COLORS[sp];
+          r = clamp(r + sc.r * normalized * heat * 1.8, 0, 255);
+          g = clamp(g + sc.g * normalized * heat * 1.8, 0, 255);
+          b = clamp(b + sc.b * normalized * heat * 1.8, 0, 255);
+        }
+      }
+
+      if (maxVal <= 0.5) {
+        image.data[i * 4 + 3] = 0;
+        continue;
+      }
+
+      const normalized = 1 - Math.exp(-maxVal / 110);
+      image.data[i * 4]     = r;
+      image.data[i * 4 + 1] = g;
+      image.data[i * 4 + 2] = b;
+      image.data[i * 4 + 3] = clamp(30 + normalized * 225, 0, 245);
+    }
+
+    renderTrailCanvas(ctx, offscreen, image, "screen");
   }
 
   function isWallAt(x: number, y: number) {
@@ -783,6 +1044,14 @@ export default function App() {
     const sensorDistance = currentSettings.sensorDistance;
     const sensorAngle = currentSettings.sensorAngle;
 
+    // Determine which nest this ant belongs to
+    const homeNest = isWars
+      ? (ant.colony === 0 ? nestARef.current : nestBRef.current)
+      : nestRef.current;
+
+    const nestDistSq = distanceSquared(ant.x, ant.y, homeNest.x, homeNest.y);
+
+    // Wall avoidance
     const leftWall = wallSensor(ant.x, ant.y, ant.angle - sensorAngle, sensorDistance);
     const centerWall = wallSensor(ant.x, ant.y, ant.angle, sensorDistance * 0.85);
     const rightWall = wallSensor(ant.x, ant.y, ant.angle + sensorAngle, sensorDistance);
@@ -796,6 +1065,7 @@ export default function App() {
       ant.angle -= 0.34;
     }
 
+    // Trail sensing
     const left = smellLayer(followMap, followAgeMap, ant.x, ant.y, ant.angle - sensorAngle, sensorDistance);
     const center = smellLayer(followMap, followAgeMap, ant.x, ant.y, ant.angle, sensorDistance);
     const right = smellLayer(followMap, followAgeMap, ant.x, ant.y, ant.angle + sensorAngle, sensorDistance);
@@ -804,22 +1074,27 @@ export default function App() {
     const weightedCenter = center * ant.pheromoneSensitivity;
     const weightedRight = right * ant.pheromoneSensitivity;
 
+    const signalTotal = weightedLeft + weightedCenter + weightedRight;
     const strongestSignal = Math.max(weightedLeft, weightedCenter, weightedRight);
-    const signalConfidence = clamp(strongestSignal / 420, 0, 1);
-    const committedSignal = signalConfidence * ant.trailCommitment;
+    const signalConfidence = clamp(strongestSignal / 380, 0, 1);
 
-    if (strongestSignal > currentSettings.trailThreshold) {
-      if (weightedLeft > weightedRight && weightedLeft > weightedCenter * 0.68) {
-        ant.angle -= ant.turnRate * (1.35 + committedSignal * 2.55);
-      } else if (weightedRight > weightedLeft && weightedRight > weightedCenter * 0.68) {
-        ant.angle += ant.turnRate * (1.35 + committedSignal * 2.55);
+    // Suppress trail-following when searching near nest — prevents circling behaviour
+    const nearNest = nestDistSq < (NEST_RADIUS * 4.8) * (NEST_RADIUS * 4.8);
+    const suppressTrail = ant.state === "searching" && (nearNest || ant.stateAge < 45);
+
+    if (!suppressTrail && signalTotal > currentSettings.trailThreshold * 1.5) {
+      // Signal-difference-based turning: continuous turn proportional to L-R imbalance
+      const leftDiff = weightedLeft - weightedCenter * 0.72;
+      const rightDiff = weightedRight - weightedCenter * 0.72;
+      const commitment = clamp(signalConfidence * ant.trailCommitment, 0, 1);
+      const turnStrength = ant.turnRate * (1.8 + commitment * 3.2);
+
+      if (leftDiff > 0 && leftDiff > rightDiff) {
+        ant.angle -= turnStrength * clamp(leftDiff / (signalTotal + 1), 0, 1);
+      } else if (rightDiff > 0 && rightDiff > leftDiff) {
+        ant.angle += turnStrength * clamp(rightDiff / (signalTotal + 1), 0, 1);
       }
     }
-
-    // Determine which nest this ant belongs to
-    const homeNest = isWars
-      ? (ant.colony === 0 ? nestARef.current : nestBRef.current)
-      : nestRef.current;
 
     if (ant.state === "searching") {
       const closestFood = getClosestFoodInRange(ant.x, ant.y, 90);
@@ -835,10 +1110,7 @@ export default function App() {
         ant.memoryStrength *= 0.9991;
       }
 
-      const nestDistance = Math.sqrt(
-        distanceSquared(ant.x, ant.y, homeNest.x, homeNest.y)
-      );
-
+      const nestDistance = Math.sqrt(nestDistSq);
       const homeTrailDecay = clamp(1 - ant.stateAge / 900, 0.12, 1);
       const nestProximity = clamp(1 - nestDistance / 620, 0.08, 1);
 
@@ -851,8 +1123,9 @@ export default function App() {
       }
     } else {
       const homeAngle = angleTo(ant.x, ant.y, homeNest.x, homeNest.y);
-      const homeDistance = Math.sqrt(distanceSquared(ant.x, ant.y, homeNest.x, homeNest.y));
-      const homePull = clamp(0.038 + homeDistance / 17000, 0.045, 0.14);
+      const homeDistance = Math.sqrt(nestDistSq);
+      // Stronger pull when close to nest (0.07 far → 0.24 close)
+      const homePull = clamp(0.07 + (1 - homeDistance / 580) * 0.17, 0.07, 0.24);
 
       ant.angle = mixAngle(ant.angle, homeAngle, homePull);
 
@@ -869,14 +1142,17 @@ export default function App() {
     ant.turnBias += randomBetween(-0.0055, 0.0055);
     ant.turnBias = clamp(ant.turnBias, -0.045, 0.045);
 
-    const trailStability = 1 - signalConfidence * 0.66;
+    // Returning ants commit to the route — far less random wandering
+    const explorationScale = ant.state === "returning" ? 0.28 : 1.0;
+    const trailStability = 1 - signalConfidence * 0.72;
     const randomTurn =
       (Math.random() - 0.5) *
       ant.turnRate *
       ant.exploration *
       currentSettings.exploration *
       2.55 *
-      trailStability;
+      trailStability *
+      explorationScale;
 
     ant.angle += randomTurn + ant.turnBias;
 
@@ -916,8 +1192,28 @@ export default function App() {
       ant.stuckTicks = Math.max(0, ant.stuckTicks - 1);
     }
 
-    if (ant.stuckTicks > 12) {
-      ant.angle = randomBetween(0, Math.PI * 2);
+    // Smart unstuck: test 8 directions, pick the one with the most clear steps ahead
+    if (ant.stuckTicks > 8) {
+      let bestAngle = ant.angle;
+      let bestClear = -1;
+
+      for (let i = 0; i < 8; i++) {
+        const testAngle = (i / 8) * Math.PI * 2;
+        let clearSteps = 0;
+
+        for (let s = 1; s <= 4; s++) {
+          const tx = ant.x + Math.cos(testAngle) * speed * s;
+          const ty = ant.y + Math.sin(testAngle) * speed * s;
+          if (!isWallAt(tx, ty)) clearSteps++;
+        }
+
+        if (clearSteps > bestClear) {
+          bestClear = clearSteps;
+          bestAngle = testAngle;
+        }
+      }
+
+      ant.angle = bestAngle;
       ant.stuckTicks = 0;
     }
 
@@ -1104,11 +1400,19 @@ export default function App() {
 
   function tick() {
     if (!isPausedRef.current) {
-      for (const ant of antsRef.current) {
-        updateAnt(ant);
-      }
+      const mode = settingsRef.current.viewMode;
 
-      updatePheromones();
+      if (mode === "physarum") {
+        for (const agent of slimeAgentsRef.current) {
+          updateSlimeAgent(agent);
+        }
+        updateSlimePheromones();
+      } else {
+        for (const ant of antsRef.current) {
+          updateAnt(ant);
+        }
+        updatePheromones();
+      }
     }
 
     draw();
@@ -1153,8 +1457,15 @@ export default function App() {
     const isWars = currentSettings.viewMode === "wars";
     const isNebula = currentSettings.viewMode === "nebula";
     const isBio = currentSettings.viewMode === "bio";
+    const isPhysarum = currentSettings.viewMode === "physarum";
 
     drawBackground(ctx);
+
+    // Physarum uses its own trail map and rendering
+    if (isPhysarum) {
+      drawSlimePheromones(ctx);
+      return;
+    }
 
     if (currentSettings.trailMode !== "invisible") {
       if (isWars) {
@@ -1213,6 +1524,12 @@ export default function App() {
   function drawBackground(ctx: CanvasRenderingContext2D) {
     const currentSettings = settingsRef.current;
     const mode = currentSettings.viewMode;
+
+    if (mode === "physarum") {
+      ctx.fillStyle = "#000000";
+      ctx.fillRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+      return;
+    }
 
     if (mode === "nebula" || mode === "bio") {
       // Pure black (nebula) or deep ocean (bio)
@@ -1441,6 +1758,29 @@ export default function App() {
     return image;
   }
 
+  function applyChromaAberration(src: ImageData, shift: number): ImageData {
+    const dst = new ImageData(src.width, src.height);
+    const w = src.width;
+    const h = src.height;
+    const px = Math.round(shift);
+
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const di = (y * w + x) * 4;
+        const rx = clamp(x - px, 0, w - 1);
+        const bx = clamp(x + px, 0, w - 1);
+        const ri = (y * w + rx) * 4;
+        const gi = di;
+        const bi = (y * w + bx) * 4;
+        dst.data[di]     = src.data[ri];
+        dst.data[di + 1] = src.data[gi + 1];
+        dst.data[di + 2] = src.data[bi + 2];
+        dst.data[di + 3] = Math.max(src.data[ri + 3], src.data[gi + 3], src.data[bi + 3]);
+      }
+    }
+    return dst;
+  }
+
   function renderTrailCanvas(
     ctx: CanvasRenderingContext2D,
     offscreen: HTMLCanvasElement,
@@ -1451,25 +1791,38 @@ export default function App() {
     const offCtx = offscreen.getContext("2d");
     if (!offCtx) return;
 
-    offCtx.putImageData(image, 0, 0);
+    const ca = currentSettings.chromaticAberration;
+    const finalImage = ca > 0.1 ? applyChromaAberration(image, ca * 2.5) : image;
+    offCtx.putImageData(finalImage, 0, 0);
 
     ctx.save();
     ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
     ctx.globalCompositeOperation = compositeOp;
 
     if (currentSettings.trailBloom > 0) {
-      ctx.filter = `blur(${currentSettings.trailBloom * 12}px)`;
-      ctx.globalAlpha = clamp(currentSettings.trailBloom * 0.32, 0, 0.7);
+      const bloom = currentSettings.trailBloom;
+
+      // Pass 1: wide corona glow
+      ctx.filter = `blur(${bloom * 18}px)`;
+      ctx.globalAlpha = clamp(bloom * 0.16, 0, 0.5);
       ctx.drawImage(offscreen, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
 
-      ctx.filter = `blur(${currentSettings.trailBloom * 5.5}px)`;
-      ctx.globalAlpha = clamp(currentSettings.trailBloom * 0.46, 0, 0.9);
+      // Pass 2: medium halo
+      ctx.filter = `blur(${bloom * 9}px)`;
+      ctx.globalAlpha = clamp(bloom * 0.26, 0, 0.68);
+      ctx.drawImage(offscreen, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+
+      // Pass 3: tight inner glow
+      ctx.filter = `blur(${bloom * 4}px)`;
+      ctx.globalAlpha = clamp(bloom * 0.44, 0, 0.88);
       ctx.drawImage(offscreen, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
 
       ctx.filter = "none";
       ctx.globalAlpha = 1;
     }
 
+    // Sharp core pass
     ctx.drawImage(offscreen, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
     ctx.restore();
   }
@@ -1783,23 +2136,63 @@ export default function App() {
     coreColor: string,
     label: string
   ) {
+    const t = performance.now() / 1000;
+    const pulse = Math.sin(t * 2.2) * 0.5 + 0.5;
+
+    // Pulsing outer glow
     ctx.beginPath();
     ctx.fillStyle = glowColor;
-    ctx.arc(x, y, NEST_RADIUS + 16, 0, Math.PI * 2);
+    ctx.arc(x, y, NEST_RADIUS + 14 + pulse * 8, 0, Math.PI * 2);
     ctx.fill();
 
+    // Core disc with gradient
+    const coreGrad = ctx.createRadialGradient(x, y, 0, x, y, NEST_RADIUS);
+    coreGrad.addColorStop(0, "#1a0f05");
+    coreGrad.addColorStop(0.45, coreColor);
+    coreGrad.addColorStop(1, "#1c1108");
     ctx.beginPath();
-    ctx.fillStyle = coreColor;
+    ctx.fillStyle = coreGrad;
     ctx.arc(x, y, NEST_RADIUS, 0, Math.PI * 2);
     ctx.fill();
 
+    // Outer hexagonal arc segments
+    ctx.lineWidth = 2;
+    for (let i = 0; i < 6; i++) {
+      const seg = i / 6;
+      const startA = seg * Math.PI * 2 - Math.PI / 6;
+      const endA = (seg + 1 / 6) * Math.PI * 2 - Math.PI / 6;
+      const alpha = 0.18 + (i % 2 === 0 ? 0.12 : 0) + pulse * 0.08;
+      ctx.strokeStyle = `rgba(255,255,255,${alpha.toFixed(2)})`;
+      ctx.beginPath();
+      ctx.arc(x, y, NEST_RADIUS + 4, startA + 0.1, endA - 0.1);
+      ctx.stroke();
+    }
+
+    // Inner hex ring
+    ctx.lineWidth = 1;
+    for (let i = 0; i < 6; i++) {
+      const seg = i / 6;
+      const startA = seg * Math.PI * 2;
+      const endA = (seg + 1 / 6) * Math.PI * 2;
+      ctx.strokeStyle = "rgba(255,255,255,0.10)";
+      ctx.beginPath();
+      ctx.arc(x, y, NEST_RADIUS * 0.66, startA + 0.12, endA - 0.12);
+      ctx.stroke();
+    }
+
+    // Dark entrance hole with depth gradient
+    const holeGrad = ctx.createRadialGradient(x, y, 0, x, y, NEST_RADIUS * 0.52);
+    holeGrad.addColorStop(0, "rgba(0,0,0,0.96)");
+    holeGrad.addColorStop(0.55, "rgba(0,0,0,0.55)");
+    holeGrad.addColorStop(1, "rgba(0,0,0,0)");
     ctx.beginPath();
-    ctx.fillStyle = "#2b1a0d";
-    ctx.arc(x, y, NEST_RADIUS * 0.58, 0, Math.PI * 2);
+    ctx.fillStyle = holeGrad;
+    ctx.arc(x, y, NEST_RADIUS * 0.52, 0, Math.PI * 2);
     ctx.fill();
 
+    // Outer ring
     ctx.beginPath();
-    ctx.strokeStyle = "rgba(255,255,255,0.35)";
+    ctx.strokeStyle = "rgba(255,255,255,0.28)";
     ctx.lineWidth = 2;
     ctx.arc(x, y, NEST_RADIUS + 2, 0, Math.PI * 2);
     ctx.stroke();
@@ -1807,7 +2200,7 @@ export default function App() {
     ctx.fillStyle = "#ffe4b5";
     ctx.font = "bold 11px system-ui";
     ctx.textAlign = "center";
-    ctx.fillText(label, x, y + NEST_RADIUS + 21);
+    ctx.fillText(label, x, y + NEST_RADIUS + 22);
   }
 
   function drawNest(ctx: CanvasRenderingContext2D) {
@@ -1829,45 +2222,72 @@ export default function App() {
       ctx.rotate(ant.angle);
 
       const bodyColor = ant.state === "returning" ? "#ffe07a" : "#eef3fb";
-      const shadowColor =
-        ant.state === "returning"
-          ? "rgba(255,224,122,0.22)"
-          : "rgba(238,243,251,0.13)";
+      const legColor = ant.state === "returning" ? "rgba(255,210,80,0.55)" : "rgba(190,205,230,0.55)";
 
+      // Glow halo when carrying food
+      if (ant.carryingFood) {
+        ctx.beginPath();
+        ctx.fillStyle = "rgba(126,231,135,0.18)";
+        ctx.arc(-3, 0, 11, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Shadow ellipse
       ctx.beginPath();
-      ctx.fillStyle = shadowColor;
+      ctx.fillStyle = ant.state === "returning" ? "rgba(255,224,122,0.18)" : "rgba(238,243,251,0.1)";
       ctx.ellipse(0, 0, 9, 4, 0, 0, Math.PI * 2);
       ctx.fill();
 
-      ctx.fillStyle = bodyColor;
+      // 3 pairs of legs — drawn before body so body overlaps them
+      ctx.strokeStyle = legColor;
+      ctx.lineWidth = 0.65;
+      const legBases = [-2, 1, 4];
+      for (const lx of legBases) {
+        ctx.beginPath();
+        ctx.moveTo(lx, -2.1);
+        ctx.lineTo(lx - 1.5, -5.5);
+        ctx.lineTo(lx + 0.5, -8.5);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(lx, 2.1);
+        ctx.lineTo(lx - 1.5, 5.5);
+        ctx.lineTo(lx + 0.5, 8.5);
+        ctx.stroke();
+      }
 
+      // Body segments: abdomen, thorax, head
+      ctx.fillStyle = bodyColor;
       ctx.beginPath();
       ctx.ellipse(-3.5, 0, 3.8, 2.4, 0, 0, Math.PI * 2);
       ctx.fill();
-
       ctx.beginPath();
       ctx.ellipse(1.5, 0, 4.3, 2.5, 0, 0, Math.PI * 2);
       ctx.fill();
-
       ctx.beginPath();
       ctx.ellipse(6.2, 0, 2.4, 2.1, 0, 0, Math.PI * 2);
       ctx.fill();
 
-      ctx.strokeStyle = "rgba(255,255,255,0.38)";
-      ctx.lineWidth = 1;
-
+      // Antennae
+      ctx.strokeStyle = "rgba(255,255,255,0.4)";
+      ctx.lineWidth = 0.9;
       ctx.beginPath();
-      ctx.moveTo(5.8, -1.1);
-      ctx.lineTo(8.9, -3.4);
-      ctx.moveTo(5.8, 1.1);
-      ctx.lineTo(8.9, 3.4);
+      ctx.moveTo(7, -1.3);
+      ctx.lineTo(9.5, -4);
+      ctx.lineTo(10.8, -3.2);
+      ctx.moveTo(7, 1.3);
+      ctx.lineTo(9.5, 4);
+      ctx.lineTo(10.8, 3.2);
       ctx.stroke();
 
+      // Food pellet when carrying
       if (ant.carryingFood) {
         ctx.beginPath();
         ctx.fillStyle = "#7ee787";
         ctx.arc(-8.3, 0, 2.8, 0, Math.PI * 2);
         ctx.fill();
+        ctx.strokeStyle = "rgba(255,255,255,0.45)";
+        ctx.lineWidth = 0.8;
+        ctx.stroke();
       }
 
       ctx.restore();
@@ -1880,7 +2300,6 @@ export default function App() {
       ctx.translate(ant.x, ant.y);
       ctx.rotate(ant.angle);
 
-      // Colony 0 = amber/orange, Colony 1 = cyan
       const isColony0 = ant.colony === 0;
       const carrying = ant.carryingFood;
 
@@ -1888,45 +2307,63 @@ export default function App() {
         ? (carrying ? "#ffcc44" : "#ffb347")
         : (carrying ? "#44eeff" : "#00e5ff");
 
-      const shadowColor = isColony0
-        ? "rgba(255,179,71,0.28)"
-        : "rgba(0,229,255,0.22)";
+      const legColor = isColony0
+        ? "rgba(255,179,71,0.5)"
+        : "rgba(0,229,255,0.45)";
 
       // Glow when carrying food
       if (carrying) {
         ctx.beginPath();
-        ctx.fillStyle = isColony0 ? "rgba(255,200,60,0.3)" : "rgba(0,229,255,0.28)";
-        ctx.arc(0, 0, 12, 0, Math.PI * 2);
+        ctx.fillStyle = isColony0 ? "rgba(255,200,60,0.25)" : "rgba(0,229,255,0.22)";
+        ctx.arc(-3, 0, 12, 0, Math.PI * 2);
         ctx.fill();
       }
 
+      // Shadow
       ctx.beginPath();
-      ctx.fillStyle = shadowColor;
+      ctx.fillStyle = isColony0 ? "rgba(255,179,71,0.22)" : "rgba(0,229,255,0.18)";
       ctx.ellipse(0, 0, 9, 4, 0, 0, Math.PI * 2);
       ctx.fill();
 
-      ctx.fillStyle = bodyColor;
+      // Legs
+      ctx.strokeStyle = legColor;
+      ctx.lineWidth = 0.65;
+      const legBases = [-2, 1, 4];
+      for (const lx of legBases) {
+        ctx.beginPath();
+        ctx.moveTo(lx, -2.1);
+        ctx.lineTo(lx - 1.5, -5.5);
+        ctx.lineTo(lx + 0.5, -8.5);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(lx, 2.1);
+        ctx.lineTo(lx - 1.5, 5.5);
+        ctx.lineTo(lx + 0.5, 8.5);
+        ctx.stroke();
+      }
 
+      // Body segments
+      ctx.fillStyle = bodyColor;
       ctx.beginPath();
       ctx.ellipse(-3.5, 0, 3.8, 2.4, 0, 0, Math.PI * 2);
       ctx.fill();
-
       ctx.beginPath();
       ctx.ellipse(1.5, 0, 4.3, 2.5, 0, 0, Math.PI * 2);
       ctx.fill();
-
       ctx.beginPath();
       ctx.ellipse(6.2, 0, 2.4, 2.1, 0, 0, Math.PI * 2);
       ctx.fill();
 
-      ctx.strokeStyle = "rgba(255,255,255,0.32)";
-      ctx.lineWidth = 1;
-
+      // Antennae
+      ctx.strokeStyle = "rgba(255,255,255,0.35)";
+      ctx.lineWidth = 0.9;
       ctx.beginPath();
-      ctx.moveTo(5.8, -1.1);
-      ctx.lineTo(8.9, -3.4);
-      ctx.moveTo(5.8, 1.1);
-      ctx.lineTo(8.9, 3.4);
+      ctx.moveTo(7, -1.3);
+      ctx.lineTo(9.5, -4);
+      ctx.lineTo(10.8, -3.2);
+      ctx.moveTo(7, 1.3);
+      ctx.lineTo(9.5, 4);
+      ctx.lineTo(10.8, 3.2);
       ctx.stroke();
 
       if (carrying) {
@@ -2070,7 +2507,8 @@ export default function App() {
     science: "#ffcc44",
     wars: "#ffb347",
     nebula: "#e040fb",
-    bio: "#00e5ff"
+    bio: "#00e5ff",
+    physarum: "#39ff8f"
   };
   const accent = modeAccentMap[settings.viewMode];
 
@@ -2086,7 +2524,7 @@ export default function App() {
         </div>
 
         <section className="section">
-          <h2 className="sectionHeader">Mode</h2>
+          <h2 className="sectionHeader">Simulation</h2>
           <div className="modeRow">
             <button
               className={`modeCard${settings.viewMode === "colony" ? " active" : ""}`}
@@ -2113,7 +2551,11 @@ export default function App() {
               <span className="modeSubtitle">analysis</span>
             </button>
           </div>
-          <div className="modeRow" style={{ marginTop: "0.5rem" }}>
+        </section>
+
+        <section className="section">
+          <h2 className="sectionHeader">Visual Art</h2>
+          <div className="modeRow">
             <button
               className={`modeCard${settings.viewMode === "visualizer" ? " active" : ""}`}
               onClick={() => applyMode("visualizer")}
@@ -2135,8 +2577,18 @@ export default function App() {
               onClick={() => applyMode("bio")}
             >
               <span className="modeIcon">🌊</span>
-              <span className="modeName">Bioluminescence</span>
+              <span className="modeName">Bio</span>
               <span className="modeSubtitle">deep ocean</span>
+            </button>
+          </div>
+          <div className="modeRow" style={{ marginTop: "0.5rem" }}>
+            <button
+              className={`modeCard${settings.viewMode === "physarum" ? " active" : ""}`}
+              onClick={() => applyMode("physarum")}
+            >
+              <span className="modeIcon">🧫</span>
+              <span className="modeName">Physarum</span>
+              <span className="modeSubtitle">slime networks</span>
             </button>
           </div>
         </section>
@@ -2303,6 +2755,46 @@ export default function App() {
             display={settings.trailBloom.toFixed(2)}
             onChange={(value) => setSettings((current) => ({ ...current, trailBloom: value }))}
           />
+
+          <Slider
+            label="Chromatic aberration"
+            value={settings.chromaticAberration}
+            min={0}
+            max={3}
+            step={0.1}
+            display={settings.chromaticAberration.toFixed(1)}
+            onChange={(value) => setSettings((current) => ({ ...current, chromaticAberration: value }))}
+          />
+
+          {settings.viewMode === "physarum" && (
+            <>
+              <Slider
+                label="Turn speed"
+                value={settings.slimeTurnSpeed}
+                min={0.05}
+                max={1.2}
+                step={0.01}
+                display={settings.slimeTurnSpeed.toFixed(2)}
+                onChange={(value) => setSettings((current) => ({ ...current, slimeTurnSpeed: value }))}
+              />
+              <label>
+                Species
+                <select
+                  value={settings.slimeSpecies}
+                  onChange={(e) => {
+                    const sp = Number(e.target.value) as 1 | 2 | 3;
+                    setSettings((cur) => ({ ...cur, slimeSpecies: sp }));
+                    initSlimeAgents(settings.antCount, sp);
+                    clearSlimeTrail();
+                  }}
+                >
+                  <option value={1}>1 species</option>
+                  <option value={2}>2 species</option>
+                  <option value={3}>3 species</option>
+                </select>
+              </label>
+            </>
+          )}
 
           <Slider
             label="Trail lifetime"
