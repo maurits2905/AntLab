@@ -1151,23 +1151,25 @@ export default function App() {
       }
 
       const nestDistance = Math.sqrt(nestDistSq);
-      const homeTrailDecay = clamp(1 - ant.stateAge / 900, 0.12, 1);
-      const nestProximity = clamp(1 - nestDistance / 620, 0.08, 1);
+      const homeTrailDecay = clamp(1 - ant.stateAge / 900, 0.45, 1);
 
       if (ant.age % 2 < 1) {
         if (isWars) {
-          depositColonyHome(ant.colony, ant.x, ant.y, 0.34 * ant.depositStrength * homeTrailDecay * nestProximity, 1);
+          depositColonyHome(ant.colony, ant.x, ant.y, 0.52 * ant.depositStrength * homeTrailDecay, 1);
         } else {
-          depositHomePheromone(ant.x, ant.y, 0.34 * ant.depositStrength * homeTrailDecay * nestProximity, 1);
+          depositHomePheromone(ant.x, ant.y, 0.52 * ant.depositStrength * homeTrailDecay, 1);
         }
       }
     } else {
-      const homeAngle = angleTo(ant.x, ant.y, homeNest.x, homeNest.y);
       const homeDistance = Math.sqrt(nestDistSq);
-      // Stronger pull when close to nest (0.07 far → 0.24 close)
-      const homePull = clamp(0.07 + (1 - homeDistance / 580) * 0.17, 0.07, 0.24);
-
-      ant.angle = mixAngle(ant.angle, homeAngle, homePull);
+      // Micro-nudge only — trail following is the primary nav, GPS just prevents ants getting forever lost
+      if (signalTotal < currentSettings.trailThreshold) {
+        const homeAngle = angleTo(ant.x, ant.y, homeNest.x, homeNest.y);
+        const fallbackPull = homeDistance < 180
+          ? clamp(0.02 + (1 - homeDistance / 180) * 0.03, 0.02, 0.05)
+          : 0.003;
+        ant.angle = mixAngle(ant.angle, homeAngle, fallbackPull);
+      }
 
       const foodTrailDecay = clamp(1 - ant.stateAge / 950, 0.22, 1);
       const distanceBoost = clamp(homeDistance / 380, 0.32, 1.35);
@@ -1182,8 +1184,9 @@ export default function App() {
     ant.turnBias += randomBetween(-0.0055, 0.0055);
     ant.turnBias = clamp(ant.turnBias, -0.045, 0.045);
 
-    // Returning ants commit to the route — far less random wandering
-    const explorationScale = ant.state === "returning" ? 0.28 : 1.0;
+    // Returning ants: wander when no trail found, commit tightly when trail present
+    const returningHasTrail = ant.state === "returning" && signalTotal >= currentSettings.trailThreshold;
+    const explorationScale = ant.state !== "returning" ? 1.0 : (returningHasTrail ? 0.18 : 0.82);
     const trailStability = 1 - signalConfidence * 0.72;
     const randomTurn =
       (Math.random() - 0.5) *
@@ -1342,7 +1345,8 @@ export default function App() {
           ant.memoryX = food.x;
           ant.memoryY = food.y;
           ant.memoryStrength = clamp(0.45 + food.quality * 0.18, 0.45, 0.96);
-          ant.angle = angleTo(ant.x, ant.y, homeNest.x, homeNest.y);
+          // Turn roughly around — ant should find home via pheromone trails, not GPS
+          ant.angle += Math.PI + randomBetween(-0.55, 0.55);
 
           if (isWars) {
             depositColonyFood(ant.colony, ant.x, ant.y, 44 * food.quality * ant.depositStrength, 2);
