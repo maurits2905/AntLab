@@ -2533,13 +2533,24 @@ export default function App() {
     link.click();
   }, []);
 
-  // Derived values for stats UI
-  const isWarsMode = settings.viewMode === "wars";
+  // Reinitialise slime agents when count changes in physarum mode
+  useEffect(() => {
+    if (settingsRef.current.viewMode === "physarum") {
+      initSlimeAgents(settings.antCount, settings.slimeSpecies);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings.antCount]);
+
+  // Derived values
+  const mode = settings.viewMode;
+  const isWarsMode = mode === "wars";
+  const isAntTab  = mode === "colony" || mode === "wars" || mode === "science";
+  const isSlimeTab = mode === "physarum";
+  const isArtTab  = mode === "visualizer" || mode === "nebula" || mode === "bio";
   const totalAnts = stats.activeAnts;
   const searchingPct = totalAnts > 0 ? (stats.searchingAnts / totalAnts) * 100 : 0;
   const returningPct = totalAnts > 0 ? (stats.returningAnts / totalAnts) * 100 : 0;
 
-  // Mode accent color driven by CSS variable
   const modeAccentMap: Record<ViewMode, string> = {
     colony: "#7ee787",
     visualizer: "#67b7ff",
@@ -2549,521 +2560,392 @@ export default function App() {
     bio: "#00e5ff",
     physarum: "#39ff8f"
   };
-  const accent = modeAccentMap[settings.viewMode];
+  const accent = modeAccentMap[mode];
+
+  const modeLabel: Record<ViewMode, string> = {
+    colony: "Colony", wars: "Colony Wars", science: "Science",
+    visualizer: "Trail Art", nebula: "Nebula", bio: "Ocean Bio",
+    physarum: "Physarum"
+  };
+
+  const stageMeta = isSlimeTab
+    ? `${settings.antCount} agents · ${settings.slimeSpecies === 1 ? "1 species" : `${settings.slimeSpecies} species`}`
+    : `${stats.activeAnts} ants · ${tool} tool`;
+
+  const set = <K extends keyof Settings>(k: K, v: Settings[K]) =>
+    setSettings((c) => ({ ...c, [k]: v }));
 
   return (
     <main className="app" style={{ "--mode-accent": accent } as React.CSSProperties}>
       <aside className="panel">
-        <div className="titleBlock">
-          <p className="eyebrow">Browser sandbox</p>
+
+        {/* ── Logo ───────────────────────────── */}
+        <div className="panelLogo">
+          <span className="eyebrow">Browser sandbox</span>
           <h1>AntLab</h1>
-          <p>
-            Pheromone-trail ant colony simulator with colony wars, science analysis, and generative art modes.
-          </p>
         </div>
 
-        <section className="section">
-          <h2 className="sectionHeader">Simulation</h2>
-          <div className="modeRow">
-            <button
-              className={`modeCard${settings.viewMode === "colony" ? " active" : ""}`}
-              onClick={() => applyMode("colony")}
-            >
-              <span className="modeIcon">🐜</span>
-              <span className="modeName">Colony</span>
-              <span className="modeSubtitle">foraging sim</span>
-            </button>
-            <button
-              className={`modeCard${settings.viewMode === "wars" ? " active" : ""}`}
-              onClick={() => applyMode("wars")}
-            >
-              <span className="modeIcon">⚔️</span>
-              <span className="modeName">Wars</span>
-              <span className="modeSubtitle">colony conflict</span>
-            </button>
-            <button
-              className={`modeCard${settings.viewMode === "science" ? " active" : ""}`}
-              onClick={() => applyMode("science")}
-            >
-              <span className="modeIcon">🔬</span>
-              <span className="modeName">Science</span>
-              <span className="modeSubtitle">analysis</span>
-            </button>
-          </div>
-        </section>
+        {/* ── Category tabs ───────────────────── */}
+        <div className="catTabs">
+          <button className={`catTab${isAntTab ? " active" : ""}`} onClick={() => !isAntTab && applyMode("colony")}>
+            <span className="catTabIcon">🐜</span>
+            <span className="catTabLabel">Ants</span>
+          </button>
+          <button className={`catTab${isSlimeTab ? " active" : ""}`} onClick={() => !isSlimeTab && applyMode("physarum")}>
+            <span className="catTabIcon">🧫</span>
+            <span className="catTabLabel">Slime</span>
+          </button>
+          <button className={`catTab${isArtTab ? " active" : ""}`} onClick={() => !isArtTab && applyMode("visualizer")}>
+            <span className="catTabIcon">✦</span>
+            <span className="catTabLabel">Art</span>
+          </button>
+        </div>
 
-        <section className="section">
-          <h2 className="sectionHeader">Visual Art</h2>
-          <div className="modeRow">
-            <button
-              className={`modeCard${settings.viewMode === "visualizer" ? " active" : ""}`}
-              onClick={() => applyMode("visualizer")}
-            >
-              <span className="modeIcon">🌌</span>
-              <span className="modeName">Trail Art</span>
-              <span className="modeSubtitle">aurora trails</span>
-            </button>
-            <button
-              className={`modeCard${settings.viewMode === "nebula" ? " active" : ""}`}
-              onClick={() => applyMode("nebula")}
-            >
-              <span className="modeIcon">🔮</span>
-              <span className="modeName">Nebula</span>
-              <span className="modeSubtitle">cosmic drift</span>
-            </button>
-            <button
-              className={`modeCard${settings.viewMode === "bio" ? " active" : ""}`}
-              onClick={() => applyMode("bio")}
-            >
-              <span className="modeIcon">🌊</span>
-              <span className="modeName">Bio</span>
-              <span className="modeSubtitle">deep ocean</span>
-            </button>
-          </div>
-          <div className="modeRow" style={{ marginTop: "0.5rem" }}>
-            <button
-              className={`modeCard${settings.viewMode === "physarum" ? " active" : ""}`}
-              onClick={() => applyMode("physarum")}
-            >
-              <span className="modeIcon">🧫</span>
-              <span className="modeName">Physarum</span>
-              <span className="modeSubtitle">slime networks</span>
-            </button>
-          </div>
-        </section>
+        {/* ══ ANTS TAB ══════════════════════════ */}
+        {isAntTab && (<>
 
-        <section className="section">
-          <h2 className="sectionHeader">Tools</h2>
-          <div className="toolGrid">
-            <button className={tool === "food" ? "active" : ""} onClick={() => setTool("food")}>
-              🍃 Food
-            </button>
-            <button className={tool === "wall" ? "active" : ""} onClick={() => setTool("wall")}>
-              🧱 Wall
-            </button>
-            <button className={tool === "erase" ? "active" : ""} onClick={() => setTool("erase")}>
-              ✏️ Erase
-            </button>
-            <button className={tool === "nest" ? "active" : ""} onClick={() => setTool("nest")}>
-              🏠 Nest
-            </button>
-          </div>
-        </section>
+          <section className="section">
+            <div className="modeRow">
+              <button className={`modeCard${mode === "colony" ? " active" : ""}`} onClick={() => applyMode("colony")}>
+                <span className="modeIcon">🐜</span>
+                <span className="modeName">Colony</span>
+                <span className="modeSubtitle">foraging</span>
+              </button>
+              <button className={`modeCard${mode === "wars" ? " active" : ""}`} onClick={() => applyMode("wars")}>
+                <span className="modeIcon">⚔️</span>
+                <span className="modeName">Wars</span>
+                <span className="modeSubtitle">conflict</span>
+              </button>
+              <button className={`modeCard${mode === "science" ? " active" : ""}`} onClick={() => applyMode("science")}>
+                <span className="modeIcon">🔬</span>
+                <span className="modeName">Science</span>
+                <span className="modeSubtitle">analysis</span>
+              </button>
+            </div>
+          </section>
 
-        <section className="section">
-          <h2 className="sectionHeader">Simulation</h2>
+          <section className="section">
+            <h2 className="sectionHeader">Tools</h2>
+            <div className="toolGrid">
+              <button className={tool === "food"  ? "active" : ""} onClick={() => setTool("food")}>🍃 Food</button>
+              <button className={tool === "wall"  ? "active" : ""} onClick={() => setTool("wall")}>🧱 Wall</button>
+              <button className={tool === "erase" ? "active" : ""} onClick={() => setTool("erase")}>✏️ Erase</button>
+              <button className={tool === "nest"  ? "active" : ""} onClick={() => setTool("nest")}>🏠 Nest</button>
+            </div>
+            <Slider label="Brush size" value={settings.brushSize} min={4} max={48} step={1}
+              display={`${settings.brushSize}px`} onChange={(v) => set("brushSize", v)} />
+          </section>
 
-          <Slider
-            label="Ant count"
-            value={settings.antCount}
-            min={20}
-            max={2600}
-            step={20}
-            display={String(settings.antCount)}
-            onChange={(value) => setSettings((current) => ({ ...current, antCount: value }))}
-          />
+          <section className="section">
+            <h2 className="sectionHeader">Colony</h2>
+            <Slider label="Ant count" value={settings.antCount} min={20} max={2600} step={20}
+              display={String(settings.antCount)} onChange={(v) => set("antCount", v)} />
+            <Slider label="Speed" value={settings.antSpeed} min={0.3} max={3.8} step={0.1}
+              display={`${settings.antSpeed.toFixed(1)}×`} onChange={(v) => set("antSpeed", v)} />
+            <Slider label="Exploration" value={settings.exploration} min={0.05} max={2.8} step={0.05}
+              display={settings.exploration.toFixed(2)} onChange={(v) => set("exploration", v)} />
+            <Slider label="Trail persistence" value={settings.evaporation} min={0.965} max={0.999} step={0.001}
+              display={settings.evaporation.toFixed(3)} onChange={(v) => set("evaporation", v)} />
+            <Slider label="Sensor distance" value={settings.sensorDistance} min={8} max={70} step={1}
+              display={`${settings.sensorDistance}px`} onChange={(v) => set("sensorDistance", v)} />
+          </section>
 
-          <Slider
-            label="Ant speed"
-            value={settings.antSpeed}
-            min={0.3}
-            max={3.8}
-            step={0.1}
-            display={`${settings.antSpeed.toFixed(1)}×`}
-            onChange={(value) => setSettings((current) => ({ ...current, antSpeed: value }))}
-          />
+          <section className="section">
+            <h2 className="sectionHeader">Food</h2>
+            <Slider label="Amount per source" value={settings.foodAmount} min={25} max={1000} step={25}
+              display={String(settings.foodAmount)} onChange={(v) => set("foodAmount", v)} />
+            <Slider label="Quality" value={settings.foodQuality} min={0.2} max={3} step={0.1}
+              display={`${settings.foodQuality.toFixed(1)}×`} onChange={(v) => set("foodQuality", v)} />
+          </section>
 
-          <Slider
-            label="Exploration"
-            value={settings.exploration}
-            min={0.05}
-            max={2.8}
-            step={0.05}
-            display={settings.exploration.toFixed(2)}
-            onChange={(value) => setSettings((current) => ({ ...current, exploration: value }))}
-          />
+          <section className="section">
+            <h2 className="sectionHeader">Trails</h2>
+            <label>Palette
+              <select value={settings.trailPalette}
+                onChange={(e) => set("trailPalette", e.target.value as TrailPalette)}>
+                <option value="colony">Colony</option>
+                <option value="aurora">Aurora</option>
+                <option value="electric">Electric</option>
+                <option value="thermal">Thermal</option>
+                <option value="ghost">Ghost</option>
+                <option value="acid">Acid</option>
+                <option value="ice">Ice</option>
+                <option value="inferno">Inferno</option>
+                <option value="nebula">Nebula</option>
+                <option value="bio">Bioluminescence</option>
+              </select>
+            </label>
+            <label>Mode
+              <select value={settings.trailMode}
+                onChange={(e) => set("trailMode", e.target.value as TrailMode)}>
+                <option value="colored">Colored</option>
+                <option value="heatmap">Heatmap</option>
+                <option value="invisible">Hidden</option>
+              </select>
+            </label>
+            <label>Trail lifetime
+              <select value={settings.pheromoneTtl}
+                onChange={(e) => set("pheromoneTtl", Number(e.target.value))}>
+                <option value={300}>5 s</option>
+                <option value={600}>10 s</option>
+                <option value={900}>15 s</option>
+                <option value={1500}>25 s</option>
+                <option value={2400}>40 s</option>
+              </select>
+            </label>
+            <Slider label="Intensity" value={settings.trailIntensity} min={0.35} max={4.5} step={0.05}
+              display={`${settings.trailIntensity.toFixed(2)}×`} onChange={(v) => set("trailIntensity", v)} />
+            <Slider label="Bloom" value={settings.trailBloom} min={0} max={2.8} step={0.05}
+              display={settings.trailBloom.toFixed(2)} onChange={(v) => set("trailBloom", v)} />
+          </section>
 
-          <Slider
-            label="Trail persistence"
-            value={settings.evaporation}
-            min={0.965}
-            max={0.999}
-            step={0.001}
-            display={settings.evaporation.toFixed(3)}
-            onChange={(value) => setSettings((current) => ({ ...current, evaporation: value }))}
-          />
+          <section className="section">
+            <h2 className="sectionHeader">Display</h2>
+            <label>Ants
+              <select value={settings.antDisplay}
+                onChange={(e) => set("antDisplay", e.target.value as AntDisplay)}>
+                <option value="ants">Detailed ants</option>
+                <option value="particles">Particles</option>
+                <option value="hidden">Hidden</option>
+              </select>
+            </label>
+            {mode === "science" && (
+              <label className="checkbox">
+                <input type="checkbox" checked={settings.showSensors}
+                  onChange={(e) => set("showSensors", e.target.checked)} />
+                Show ant sensors
+              </label>
+            )}
+          </section>
 
-          <Slider
-            label="Sensor distance"
-            value={settings.sensorDistance}
-            min={8}
-            max={70}
-            step={1}
-            display={`${settings.sensorDistance}px`}
-            onChange={(value) => setSettings((current) => ({ ...current, sensorDistance: value }))}
-          />
+        </>)}
 
-          <Slider
-            label="Brush size"
-            value={settings.brushSize}
-            min={4}
-            max={48}
-            step={1}
-            display={`${settings.brushSize}px`}
-            onChange={(value) => setSettings((current) => ({ ...current, brushSize: value }))}
-          />
-        </section>
+        {/* ══ SLIME TAB ═════════════════════════ */}
+        {isSlimeTab && (<>
 
-        <section className="section">
-          <h2 className="sectionHeader">Visualization</h2>
-
-          <label>
-            Ant display
-            <select
-              value={settings.antDisplay}
-              onChange={(event) =>
-                setSettings((current) => ({
-                  ...current,
-                  antDisplay: event.target.value as AntDisplay
-                }))
-              }
-            >
-              <option value="ants">Ant models</option>
-              <option value="particles">Particle ants</option>
-              <option value="hidden">Hidden ants</option>
-            </select>
-          </label>
-
-          <label>
-            Trail mode
-            <select
-              value={settings.trailMode}
-              onChange={(event) =>
-                setSettings((current) => ({
-                  ...current,
-                  trailMode: event.target.value as TrailMode
-                }))
-              }
-            >
-              <option value="colored">Colored trails</option>
-              <option value="heatmap">Heatmap</option>
-              <option value="invisible">Invisible</option>
-            </select>
-          </label>
-
-          <label>
-            Trail palette
-            <select
-              value={settings.trailPalette}
-              onChange={(event) =>
-                setSettings((current) => ({
-                  ...current,
-                  trailPalette: event.target.value as TrailPalette
-                }))
-              }
-            >
-              <option value="colony">Colony</option>
-              <option value="aurora">Aurora</option>
-              <option value="electric">Electric</option>
-              <option value="thermal">Thermal</option>
-              <option value="ghost">Ghost</option>
-              <option value="acid">Acid</option>
-              <option value="ice">Ice</option>
-              <option value="inferno">Inferno</option>
-              <option value="nebula">Nebula</option>
-              <option value="bio">Bioluminescence</option>
-            </select>
-          </label>
-
-          <Slider
-            label="Trail intensity"
-            value={settings.trailIntensity}
-            min={0.35}
-            max={4.5}
-            step={0.05}
-            display={`${settings.trailIntensity.toFixed(2)}×`}
-            onChange={(value) => setSettings((current) => ({ ...current, trailIntensity: value }))}
-          />
-
-          <Slider
-            label="Trail bloom"
-            value={settings.trailBloom}
-            min={0}
-            max={2.8}
-            step={0.05}
-            display={settings.trailBloom.toFixed(2)}
-            onChange={(value) => setSettings((current) => ({ ...current, trailBloom: value }))}
-          />
-
-          <Slider
-            label="Chromatic aberration"
-            value={settings.chromaticAberration}
-            min={0}
-            max={3}
-            step={0.1}
-            display={settings.chromaticAberration.toFixed(1)}
-            onChange={(value) => setSettings((current) => ({ ...current, chromaticAberration: value }))}
-          />
-
-          {settings.viewMode === "physarum" && (
-            <>
-              <Slider
-                label="Turn speed"
-                value={settings.slimeTurnSpeed}
-                min={0.05}
-                max={1.2}
-                step={0.01}
-                display={settings.slimeTurnSpeed.toFixed(2)}
-                onChange={(value) => setSettings((current) => ({ ...current, slimeTurnSpeed: value }))}
-              />
-              <label>
-                Species
-                <select
-                  value={settings.slimeSpecies}
-                  onChange={(e) => {
-                    const sp = Number(e.target.value) as 1 | 2 | 3;
-                    setSettings((cur) => ({ ...cur, slimeSpecies: sp }));
-                    initSlimeAgents(settings.antCount, sp);
+          <section className="section">
+            <h2 className="sectionHeader">Species</h2>
+            <div className="speciesRow">
+              {([1, 2, 3] as const).map((n) => (
+                <button key={n}
+                  className={settings.slimeSpecies === n ? "active" : ""}
+                  onClick={() => {
+                    set("slimeSpecies", n);
+                    initSlimeAgents(settings.antCount, n);
                     clearSlimeTrail();
-                  }}
-                >
-                  <option value={1}>1 species</option>
-                  <option value={2}>2 species</option>
-                  <option value={3}>3 species</option>
+                  }}>
+                  {n === 1 ? "Single" : n === 2 ? "Dual" : "Triple"}
+                </button>
+              ))}
+            </div>
+            <Slider label="Agent count" value={settings.antCount} min={100} max={6000} step={100}
+              display={String(settings.antCount)} onChange={(v) => set("antCount", v)} />
+            <Slider label="Speed" value={settings.antSpeed} min={0.3} max={3.5} step={0.1}
+              display={`${settings.antSpeed.toFixed(1)}×`} onChange={(v) => set("antSpeed", v)} />
+          </section>
+
+          <section className="section">
+            <h2 className="sectionHeader">Behaviour</h2>
+            <Slider label="Turn speed" value={settings.slimeTurnSpeed} min={0.05} max={2.0} step={0.05}
+              display={settings.slimeTurnSpeed.toFixed(2)} onChange={(v) => set("slimeTurnSpeed", v)} />
+            <Slider label="Sensor distance" value={settings.sensorDistance} min={4} max={60} step={1}
+              display={`${settings.sensorDistance}px`} onChange={(v) => set("sensorDistance", v)} />
+            <Slider label="Sensor angle" value={settings.sensorAngle} min={0.1} max={1.8} step={0.05}
+              display={`${Math.round(settings.sensorAngle * 180 / Math.PI)}°`}
+              onChange={(v) => set("sensorAngle", v)} />
+            <Slider label="Trail decay" value={settings.evaporation} min={0.965} max={0.9995} step={0.0005}
+              display={settings.evaporation.toFixed(4)} onChange={(v) => set("evaporation", v)} />
+          </section>
+
+          <section className="section">
+            <h2 className="sectionHeader">Visual</h2>
+            {settings.slimeSpecies === 1 && (
+              <label>Palette
+                <select value={settings.trailPalette}
+                  onChange={(e) => set("trailPalette", e.target.value as TrailPalette)}>
+                  <option value="aurora">Aurora</option>
+                  <option value="electric">Electric</option>
+                  <option value="acid">Acid</option>
+                  <option value="ice">Ice</option>
+                  <option value="inferno">Inferno</option>
+                  <option value="ghost">Ghost</option>
+                  <option value="nebula">Nebula</option>
+                  <option value="bio">Bioluminescence</option>
+                  <option value="colony">Colony</option>
+                  <option value="thermal">Thermal</option>
                 </select>
               </label>
-            </>
-          )}
+            )}
+            <Slider label="Trail intensity" value={settings.trailIntensity} min={0.5} max={12} step={0.5}
+              display={`${settings.trailIntensity.toFixed(1)}×`} onChange={(v) => set("trailIntensity", v)} />
+            <Slider label="Bloom" value={settings.trailBloom} min={0} max={2.8} step={0.05}
+              display={settings.trailBloom.toFixed(2)} onChange={(v) => set("trailBloom", v)} />
+          </section>
 
-          <Slider
-            label="Trail lifetime"
-            value={settings.pheromoneTtl}
-            min={120}
-            max={2400}
-            step={60}
-            display={`${Math.round(settings.pheromoneTtl / 60)}s`}
-            onChange={(value) => setSettings((current) => ({ ...current, pheromoneTtl: value }))}
-          />
+        </>)}
 
-          <Slider
-            label="Trail threshold"
-            value={settings.trailThreshold}
-            min={0}
-            max={110}
-            step={2}
-            display={String(settings.trailThreshold)}
-            onChange={(value) => setSettings((current) => ({ ...current, trailThreshold: value }))}
-          />
+        {/* ══ ART TAB ═══════════════════════════ */}
+        {isArtTab && (<>
 
-          <label className="checkbox">
-            <input
-              type="checkbox"
-              checked={settings.hideWorldInVisualizer}
-              onChange={(event) =>
-                setSettings((current) => ({
-                  ...current,
-                  hideWorldInVisualizer: event.target.checked
-                }))
-              }
-            />
-            Hide food/nest in art modes
-          </label>
+          <section className="section">
+            <div className="modeRow">
+              <button className={`modeCard${mode === "visualizer" ? " active" : ""}`} onClick={() => applyMode("visualizer")}>
+                <span className="modeIcon">🌌</span>
+                <span className="modeName">Trail Art</span>
+                <span className="modeSubtitle">aurora trails</span>
+              </button>
+              <button className={`modeCard${mode === "nebula" ? " active" : ""}`} onClick={() => applyMode("nebula")}>
+                <span className="modeIcon">🔮</span>
+                <span className="modeName">Nebula</span>
+                <span className="modeSubtitle">cosmic drift</span>
+              </button>
+              <button className={`modeCard${mode === "bio" ? " active" : ""}`} onClick={() => applyMode("bio")}>
+                <span className="modeIcon">🌊</span>
+                <span className="modeName">Ocean</span>
+                <span className="modeSubtitle">bioluminescent</span>
+              </button>
+            </div>
+          </section>
 
-          <label className="checkbox">
-            <input
-              type="checkbox"
-              checked={settings.hideWallsInVisualizer}
-              onChange={(event) =>
-                setSettings((current) => ({
-                  ...current,
-                  hideWallsInVisualizer: event.target.checked
-                }))
-              }
-            />
-            Hide walls in art modes
-          </label>
+          <section className="section">
+            <h2 className="sectionHeader">Visual</h2>
+            <label>Trail palette
+              <select value={settings.trailPalette}
+                onChange={(e) => set("trailPalette", e.target.value as TrailPalette)}>
+                <option value="colony">Colony</option>
+                <option value="aurora">Aurora</option>
+                <option value="electric">Electric</option>
+                <option value="thermal">Thermal</option>
+                <option value="ghost">Ghost</option>
+                <option value="acid">Acid</option>
+                <option value="ice">Ice</option>
+                <option value="inferno">Inferno</option>
+                <option value="nebula">Nebula</option>
+                <option value="bio">Bioluminescence</option>
+              </select>
+            </label>
+            <label>Ants
+              <select value={settings.antDisplay}
+                onChange={(e) => set("antDisplay", e.target.value as AntDisplay)}>
+                <option value="ants">Detailed ants</option>
+                <option value="particles">Particles</option>
+                <option value="hidden">Hidden</option>
+              </select>
+            </label>
+            <Slider label="Trail intensity" value={settings.trailIntensity} min={0.35} max={4.5} step={0.05}
+              display={`${settings.trailIntensity.toFixed(2)}×`} onChange={(v) => set("trailIntensity", v)} />
+            <Slider label="Bloom" value={settings.trailBloom} min={0} max={2.8} step={0.05}
+              display={settings.trailBloom.toFixed(2)} onChange={(v) => set("trailBloom", v)} />
+            <Slider label="Chromatic aberration" value={settings.chromaticAberration} min={0} max={3} step={0.1}
+              display={settings.chromaticAberration.toFixed(1)} onChange={(v) => set("chromaticAberration", v)} />
+            <label className="checkbox">
+              <input type="checkbox" checked={settings.hideWorldInVisualizer}
+                onChange={(e) => set("hideWorldInVisualizer", e.target.checked)} />
+              Hide food &amp; nest
+            </label>
+            <label className="checkbox">
+              <input type="checkbox" checked={settings.hideWallsInVisualizer}
+                onChange={(e) => set("hideWallsInVisualizer", e.target.checked)} />
+              Hide walls
+            </label>
+          </section>
 
-          <label className="checkbox">
-            <input
-              type="checkbox"
-              checked={settings.showFlowField}
-              onChange={(event) =>
-                setSettings((current) => ({
-                  ...current,
-                  showFlowField: event.target.checked
-                }))
-              }
-            />
-            Show flow field
-          </label>
+          <section className="section">
+            <h2 className="sectionHeader">Colony</h2>
+            <Slider label="Ant count" value={settings.antCount} min={20} max={2600} step={20}
+              display={String(settings.antCount)} onChange={(v) => set("antCount", v)} />
+            <Slider label="Speed" value={settings.antSpeed} min={0.3} max={3.8} step={0.1}
+              display={`${settings.antSpeed.toFixed(1)}×`} onChange={(v) => set("antSpeed", v)} />
+            <Slider label="Trail persistence" value={settings.evaporation} min={0.965} max={0.999} step={0.001}
+              display={settings.evaporation.toFixed(3)} onChange={(v) => set("evaporation", v)} />
+          </section>
 
-          <label className="checkbox">
-            <input
-              type="checkbox"
-              checked={settings.showAgeContours}
-              onChange={(event) =>
-                setSettings((current) => ({
-                  ...current,
-                  showAgeContours: event.target.checked
-                }))
-              }
-            />
-            Show age contours
-          </label>
+        </>)}
 
-          <label className="checkbox">
-            <input
-              type="checkbox"
-              checked={settings.showSensors}
-              onChange={(event) =>
-                setSettings((current) => ({
-                  ...current,
-                  showSensors: event.target.checked
-                }))
-              }
-            />
-            Show ant sensors
-          </label>
-        </section>
-
-        <section className="section">
-          <h2 className="sectionHeader">Food settings</h2>
-
-          <Slider
-            label="Food amount"
-            value={settings.foodAmount}
-            min={25}
-            max={1000}
-            step={25}
-            display={String(settings.foodAmount)}
-            onChange={(value) => setSettings((current) => ({ ...current, foodAmount: value }))}
-          />
-
-          <Slider
-            label="Food quality"
-            value={settings.foodQuality}
-            min={0.2}
-            max={3}
-            step={0.1}
-            display={`${settings.foodQuality.toFixed(1)}×`}
-            onChange={(value) => setSettings((current) => ({ ...current, foodQuality: value }))}
-          />
-        </section>
-
-        <section className="section actions">
-          <button onClick={() => setIsPaused((value) => !value)}>
-            {isPaused ? "▶ Play" : "⏸ Pause"}
+        {/* ══ Always-visible controls ════════════ */}
+        <section className="section actionBar">
+          <button className={`playBtn${isPaused ? " paused" : ""}`}
+            onClick={() => setIsPaused((v) => !v)}>
+            {isPaused ? "▶  Resume" : "⏸  Pause"}
           </button>
-          <button onClick={resetSimulation}>↺ Reset</button>
-          <button onClick={clearTrails}>✦ Clear trails</button>
-          <button onClick={clearWalls}>⬛ Clear walls</button>
-          <button onClick={seedDemo}>🎮 Demo setup</button>
-          <button onClick={generateMaze}>🌀 Random maze</button>
-          <button className="savePngBtn" onClick={handleSavePng}>
-            📷 Save PNG
-          </button>
+          <div className="actionGrid">
+            <button onClick={resetSimulation}>↺ Reset</button>
+            <button onClick={isSlimeTab ? clearSlimeTrail : clearTrails}>✦ Clear trails</button>
+            {!isSlimeTab && <button onClick={clearWalls}>⬛ Clear walls</button>}
+            {!isSlimeTab && <button onClick={seedDemo}>🎮 Demo</button>}
+            {!isSlimeTab && <button onClick={generateMaze}>🌀 Maze</button>}
+            <button onClick={handleSavePng}>📷 Save PNG</button>
+          </div>
         </section>
 
+        {/* ══ Stats ══════════════════════════════ */}
         <section className="section">
           <h2 className="sectionHeader">Stats</h2>
-          <div className="stats">
-            <p>
-              <span>Food collected</span>
-              <strong>{stats.foodCollected}</strong>
-            </p>
-            <p>
-              <span>Food remaining</span>
-              <strong>{stats.foodRemaining}</strong>
-            </p>
-            <p>
-              <span>Active ants</span>
-              <strong>{stats.activeAnts}</strong>
-            </p>
-
-            <div className="statBarGroup">
-              <div className="statBarLabel">
-                <span>Searching</span>
-                <strong>{stats.searchingAnts}</strong>
-              </div>
-              <div className="statBarTrack">
-                <div
-                  className="statBarFill searching"
-                  style={{ width: `${searchingPct.toFixed(1)}%` }}
-                />
-              </div>
+          {isSlimeTab ? (
+            <div className="stats">
+              <p><span>Agents</span><strong>{settings.antCount}</strong></p>
+              <p><span>Species</span><strong>{settings.slimeSpecies}</strong></p>
+              <p><span>Time</span><strong>{formatTime(stats.elapsedSeconds)}</strong></p>
             </div>
-
-            <div className="statBarGroup">
-              <div className="statBarLabel">
-                <span>Returning</span>
-                <strong>{stats.returningAnts}</strong>
+          ) : (
+            <div className="stats">
+              <p><span>Collected</span><strong>{stats.foodCollected}</strong></p>
+              <p><span>Remaining</span><strong>{stats.foodRemaining}</strong></p>
+              <p><span>Ants</span><strong>{stats.activeAnts}</strong></p>
+              <div className="statBarGroup">
+                <div className="statBarLabel"><span>Searching</span><strong>{stats.searchingAnts}</strong></div>
+                <div className="statBarTrack">
+                  <div className="statBarFill searching" style={{ width: `${searchingPct.toFixed(1)}%` }} />
+                </div>
               </div>
-              <div className="statBarTrack">
-                <div
-                  className="statBarFill returning"
-                  style={{ width: `${returningPct.toFixed(1)}%` }}
-                />
+              <div className="statBarGroup">
+                <div className="statBarLabel"><span>Returning</span><strong>{stats.returningAnts}</strong></div>
+                <div className="statBarTrack">
+                  <div className="statBarFill returning" style={{ width: `${returningPct.toFixed(1)}%` }} />
+                </div>
               </div>
-            </div>
-
-            {isWarsMode && (
-              <>
+              {isWarsMode && (
                 <div className="colonyStats">
                   <div className="colonyStatRow colonyA">
-                    <span className="colonyDot" />
-                    <span>Colony A</span>
+                    <span className="colonyDot" /><span>Colony A</span>
                     <strong>{stats.colony0Collected}</strong>
                   </div>
                   <div className="colonyStatRow colonyB">
-                    <span className="colonyDot" />
-                    <span>Colony B</span>
+                    <span className="colonyDot" /><span>Colony B</span>
                     <strong>{stats.colony1Collected}</strong>
                   </div>
                 </div>
-              </>
-            )}
-
-            <p>
-              <span>Time elapsed</span>
-              <strong>{formatTime(stats.elapsedSeconds)}</strong>
-            </p>
-          </div>
+              )}
+              <p><span>Time</span><strong>{formatTime(stats.elapsedSeconds)}</strong></p>
+            </div>
+          )}
         </section>
+
       </aside>
 
+      {/* ══ Stage ════════════════════════════════ */}
       <section className="stage">
         <div className="stageHeader">
-          <div>
-            <p className="eyebrow">Pheromone arena</p>
-            <h2>Lab arena</h2>
-            <p>
-              Mode: <strong>{settings.viewMode}</strong> · Tool: <strong>{tool}</strong>
-            </p>
+          <div className="stageTitle">
+            <div className="stageModeChip">{modeLabel[mode]}</div>
+            <p className="stageMeta">{stageMeta}</p>
           </div>
-
           <div className="legend">
-            <span>
-              <i className="dot foodTrail" /> Food trail
-            </span>
-            <span>
-              <i className="dot homeTrail" /> Home trail
-            </span>
-            {isWarsMode && (
-              <>
-                <span>
-                  <i className="dot colonyADot" /> Colony A
-                </span>
-                <span>
-                  <i className="dot colonyBDot" /> Colony B
-                </span>
-              </>
-            )}
-            <span>
-              <i className="dot wallDot" /> Wall
-            </span>
+            {isSlimeTab ? (<>
+              <span><i className="dot slimeDot0" />{settings.slimeSpecies === 1 ? "Slime" : "Species 1"}</span>
+              {settings.slimeSpecies >= 2 && <span><i className="dot slimeDot1" />Species 2</span>}
+              {settings.slimeSpecies >= 3 && <span><i className="dot slimeDot2" />Species 3</span>}
+            </>) : isWarsMode ? (<>
+              <span><i className="dot colonyADot" />Colony A</span>
+              <span><i className="dot colonyBDot" />Colony B</span>
+              <span><i className="dot wallDot" />Wall</span>
+            </>) : (<>
+              <span><i className="dot foodTrail" />Food trail</span>
+              <span><i className="dot homeTrail" />Home trail</span>
+              <span><i className="dot wallDot" />Wall</span>
+            </>)}
           </div>
         </div>
-
         <canvas
           ref={canvasRef}
           width={WORLD_WIDTH}
