@@ -225,6 +225,8 @@ export default function App() {
   const colony1HomeAgeRef = useRef<Uint16Array>(new Uint16Array(GRID_SIZE));
 
   const wallsRef = useRef<Uint8Array>(new Uint8Array(GRID_SIZE));
+  const wallsDirtyRef = useRef<boolean>(true);
+  const wallOffscreenRef = useRef<HTMLCanvasElement | null>(null);
 
   // Physarum slime simulation — up to 3 species with separate trail maps
   const slimeAgentsRef = useRef<SlimeAgent[]>([]);
@@ -391,6 +393,7 @@ export default function App() {
 
   function clearWalls() {
     wallsRef.current = new Uint8Array(GRID_SIZE);
+    wallsDirtyRef.current = true;
   }
 
   function clearSlimeTrail() {
@@ -1018,6 +1021,7 @@ export default function App() {
         }
       }
     }
+    wallsDirtyRef.current = true;
   }
 
   function drawWallLine(
@@ -1028,7 +1032,7 @@ export default function App() {
     radius: number,
     erase: boolean
   ) {
-    const steps = Math.ceil(Math.hypot(x2 - x1, y2 - y1) / 5);
+    const steps = Math.ceil(Math.hypot(x2 - x1, y2 - y1) / 2);
 
     for (let i = 0; i <= steps; i++) {
       const t = i / Math.max(1, steps);
@@ -1239,8 +1243,11 @@ export default function App() {
     }
 
     if (isWallAt(ant.x, ant.y)) {
-      ant.x = oldX;
-      ant.y = oldY;
+      // Restore to last known-clear position only if it is actually clear
+      if (!isWallAt(oldX, oldY)) {
+        ant.x = oldX;
+        ant.y = oldY;
+      }
       ant.angle += Math.PI * randomBetween(0.68, 1.28);
       ant.stuckTicks++;
       collided = true;
@@ -1248,16 +1255,16 @@ export default function App() {
       ant.stuckTicks = Math.max(0, ant.stuckTicks - 1);
     }
 
-    // Smart unstuck: test 8 directions, pick the one with the most clear steps ahead
-    if (ant.stuckTicks > 8) {
+    // Smart unstuck: test 16 directions, pick the one with the most clear steps ahead
+    if (ant.stuckTicks > 6) {
       let bestAngle = ant.angle;
       let bestClear = -1;
 
-      for (let i = 0; i < 8; i++) {
-        const testAngle = (i / 8) * Math.PI * 2;
+      for (let i = 0; i < 16; i++) {
+        const testAngle = (i / 16) * Math.PI * 2;
         let clearSteps = 0;
 
-        for (let s = 1; s <= 4; s++) {
+        for (let s = 1; s <= 6; s++) {
           const tx = ant.x + Math.cos(testAngle) * maxSpeed * s;
           const ty = ant.y + Math.sin(testAngle) * maxSpeed * s;
           if (!isWallAt(tx, ty)) clearSteps++;
@@ -1269,8 +1276,20 @@ export default function App() {
         }
       }
 
-      ant.angle = bestAngle;
-      ant.stuckTicks = 0;
+      if (bestClear === 0 || ant.stuckTicks > 24) {
+        // Completely enclosed or hopelessly stuck — respawn at home nest
+        ant.x = homeNest.x + randomBetween(-NEST_RADIUS * 0.6, NEST_RADIUS * 0.6);
+        ant.y = homeNest.y + randomBetween(-NEST_RADIUS * 0.6, NEST_RADIUS * 0.6);
+        ant.angle = randomBetween(0, Math.PI * 2);
+        ant.vx = Math.cos(ant.angle) * ant.speed;
+        ant.vy = Math.sin(ant.angle) * ant.speed;
+        ant.state = "searching";
+        ant.carryingFood = false;
+        ant.stuckTicks = 0;
+      } else {
+        ant.angle = bestAngle;
+        ant.stuckTicks = 0;
+      }
     }
 
     if (collided) {
@@ -2111,29 +2130,98 @@ export default function App() {
     ctx.restore();
   }
 
-  function drawWalls(ctx: CanvasRenderingContext2D) {
+  function buildWallImage() {
     const walls = wallsRef.current;
+    const w = WORLD_WIDTH;
+    const h = WORLD_HEIGHT;
+    const data = new Uint8ClampedArray(w * h * 4);
 
-    ctx.fillStyle = "rgba(48,55,71,0.94)";
+    for (let gy = 0; gy < GRID_HEIGHT; gy++) {
+      for (let gx = 0; gx < GRID_WIDTH; gx++) {
+        if (!walls[gridIndex(gx, gy)]) continue;
 
-    for (let y = 0; y < GRID_HEIGHT; y++) {
-      for (let x = 0; x < GRID_WIDTH; x++) {
-        if (walls[gridIndex(x, y)]) {
-          ctx.fillRect(x * GRID_SCALE, y * GRID_SCALE, GRID_SCALE, GRID_SCALE);
+        const hasN = gy > 0            && walls[gridIndex(gx,   gy - 1)] > 0;
+        const hasS = gy < GRID_HEIGHT-1 && walls[gridIndex(gx,   gy + 1)] > 0;
+        const hasW = gx > 0            && walls[gridIndex(gx-1,  gy)]     > 0;
+        const hasE = gx < GRID_WIDTH-1  && walls[gridIndex(gx+1,  gy)]     > 0;
+        const hasNW = gy > 0 && gx > 0            && walls[gridIndex(gx-1, gy-1)] > 0;
+        const hasNE = gy > 0 && gx < GRID_WIDTH-1  && walls[gridIndex(gx+1, gy-1)] > 0;
+
+        // Per-cell texture noise (deterministic)
+        const noise = ((gx * 7 + gy * 13 + gx * gy * 3) % 29) / 29;
+
+        for (let py = 0; py < GRID_SCALE; py++) {
+          for (let px = 0; px < GRID_SCALE; px++) {
+            const wx = gx * GRID_SCALE + px;
+            const wy = gy * GRID_SCALE + py;
+            if (wx >= w || wy >= h) continue;
+
+            const idx = (wy * w + wx) * 4;
+
+            // Base stone colour with per-cell variation
+            let r = 28 + noise * 14;
+            let g = 33 + noise * 11;
+            let b = 46 + noise * 16;
+
+            // Top-face bevel highlight (exposed top edge)
+            if (!hasN) {
+              if (py === 0) { r += 52; g += 55; b += 62; }
+              else if (py === 1) { r += 22; g += 24; b += 28; }
+            }
+            // Left-face bevel highlight (exposed left edge)
+            if (!hasW) {
+              if (px === 0) { r += 36; g += 38; b += 44; }
+              else if (px === 1) { r += 14; g += 15; b += 17; }
+            }
+            // Bottom-face shadow (exposed bottom edge)
+            if (!hasS) {
+              if (py === GRID_SCALE - 1) { r -= 20; g -= 18; b -= 12; }
+              else if (py === GRID_SCALE - 2) { r -= 8; g -= 7; b -= 4; }
+            }
+            // Right-face shadow (exposed right edge)
+            if (!hasE) {
+              if (px === GRID_SCALE - 1) { r -= 16; g -= 14; b -= 9; }
+              else if (px === GRID_SCALE - 2) { r -= 6; g -= 5; b -= 3; }
+            }
+            // Inner corner accent (NW concave corner)
+            if (hasN && hasW && !hasNW && px === 0 && py === 0) {
+              r += 18; g += 20; b += 24;
+            }
+            // NE concave corner
+            if (hasN && hasE && !hasNE && px === GRID_SCALE-1 && py === 0) {
+              r += 12; g += 13; b += 16;
+            }
+
+            data[idx]     = clamp(r, 0, 255);
+            data[idx + 1] = clamp(g, 0, 255);
+            data[idx + 2] = clamp(b, 0, 255);
+            data[idx + 3] = 242;
+          }
         }
       }
     }
 
-    ctx.strokeStyle = "rgba(255,255,255,0.055)";
-    ctx.lineWidth = 1;
+    const offscreen = getOrCreateOffscreen(wallOffscreenRef);
+    offscreen.getContext("2d")!.putImageData(new ImageData(data, w, h), 0, 0);
+    wallsDirtyRef.current = false;
+  }
 
-    for (let y = 0; y < GRID_HEIGHT; y++) {
-      for (let x = 0; x < GRID_WIDTH; x++) {
-        if (walls[gridIndex(x, y)]) {
-          ctx.strokeRect(x * GRID_SCALE, y * GRID_SCALE, GRID_SCALE, GRID_SCALE);
-        }
-      }
-    }
+  function drawWalls(ctx: CanvasRenderingContext2D) {
+    if (wallsDirtyRef.current) buildWallImage();
+
+    const offscreen = wallOffscreenRef.current;
+    if (!offscreen) return;
+
+    // Soft shadow halo around wall clusters
+    ctx.filter = "blur(5px)";
+    ctx.globalAlpha = 0.42;
+    ctx.drawImage(offscreen, 0, 0);
+
+    // Crisp stone surface
+    ctx.filter = "none";
+    ctx.globalAlpha = 1;
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(offscreen, 0, 0);
   }
 
   function drawFood(ctx: CanvasRenderingContext2D) {
