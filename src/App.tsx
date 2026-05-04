@@ -610,12 +610,12 @@ export default function App() {
 
     if (nextMode === "physarum") {
       clearSlimeTrail();
-      initSlimeAgents(1400, settingsRef.current.slimeSpecies);
+      initSlimeAgents(2000, settingsRef.current.slimeSpecies);
 
       setSettings((current) => ({
         ...current,
         viewMode: "physarum",
-        antCount: 1400,
+        antCount: 2000,
         antSpeed: 1.1,
         evaporation: 0.981,
         sensorDistance: 22,
@@ -893,11 +893,11 @@ export default function App() {
       agent.y = newY;
     }
 
-    // Deposit: clamp to MAX_PHEROMONE (SebLague: min(1, old + weight * dt))
+    // Deposit: 8× multiplier calibrated so single agent leaves visible trail at default settings
     const gx = clamp(Math.floor(agent.x / GRID_SCALE), 0, GRID_WIDTH - 1);
     const gy = clamp(Math.floor(agent.y / GRID_SCALE), 0, GRID_HEIGHT - 1);
     const gi = gridIndex(gx, gy);
-    trail[gi] = Math.min(trail[gi] + s.trailIntensity, MAX_PHEROMONE);
+    trail[gi] = Math.min(trail[gi] + s.trailIntensity * 8, MAX_PHEROMONE);
   }
 
   function updateSlimePheromones() {
@@ -913,7 +913,9 @@ export default function App() {
     // diffuseRate=4 at 60fps → diffuseWeight≈0.067 (subtle spread per frame)
     // decayRate scaled to our pheromone range: (1-evaporation)*MAX_PHEROMONE*3
     const diffuseWeight = Math.min(1, 4.0 / 60);
-    const decayPerFrame = (1 - s.evaporation) * MAX_PHEROMONE * 3.2;
+    // 0.22 multiplier calibrated so decay ≈ 4/frame at default evaporation=0.981
+    // (deposit is 8× trailIntensity, so a single agent trail lasts ~12 frames)
+    const decayPerFrame = (1 - s.evaporation) * MAX_PHEROMONE * 0.22;
 
     for (let sp = 0; sp < numSpecies; sp++) {
       const trail = trails[sp];
@@ -943,15 +945,13 @@ export default function App() {
     const s = settingsRef.current;
     const trails = slimeTrailRef.current;
     const numSpecies = s.slimeSpecies;
-    const offscreen = getOrCreateOffscreen(trailCanvasRef, WORLD_WIDTH, WORLD_HEIGHT);
-    const image = new ImageData(WORLD_WIDTH, WORLD_HEIGHT);
+    // Grid resolution — GPU bilinear upscale in renderTrailCanvas gives smooth trails
+    const offscreen = getOrCreateOffscreen(trailCanvasRef, GRID_WIDTH, GRID_HEIGHT);
+    const image = new ImageData(GRID_WIDTH, GRID_HEIGHT);
 
-    // Render at full canvas resolution — nearest-neighbour grid lookup
-    for (let py = 0; py < WORLD_HEIGHT; py++) {
-      const gy = py >> 2;
-      const gyBase = gy * GRID_WIDTH;
-      for (let px = 0; px < WORLD_WIDTH; px++) {
-        const gi = gyBase + (px >> 2);
+    for (let gy = 0; gy < GRID_HEIGHT; gy++) {
+      for (let gx = 0; gx < GRID_WIDTH; gx++) {
+        const gi = gridIndex(gx, gy);
 
         let r = 0, g = 0, b = 0, maxVal = 0;
 
@@ -960,34 +960,35 @@ export default function App() {
           if (value <= 0) continue;
           if (value > maxVal) maxVal = value;
 
-          // Steeper curve for sharper bright trails (SebLague-style crisp lines)
           const t = Math.min(1, value / MAX_PHEROMONE);
-          const bright = t * t * (3 - 2 * t); // smoothstep → brighter core
-          const heat = Math.min(1, value / (MAX_PHEROMONE * 0.4));
+          // Smoothstep for brighter core, gentler falloff at trail edges
+          const bright = t * t * (3 - 2 * t);
+          const heat = Math.min(1, value / (MAX_PHEROMONE * 0.35));
 
           if (numSpecies === 1) {
-            // Single species: palette-based coloring
-            const norm = Math.min(1, value / (MAX_PHEROMONE * 0.55));
+            const norm = Math.min(1, value / (MAX_PHEROMONE * 0.4));
             const color = paletteColor(s.trailPalette, norm, norm * 0.45, norm, heat, bright);
-            if (color.r > r) r = color.r;
-            if (color.g > g) g = color.g;
-            if (color.b > b) b = color.b;
+            r = Math.max(r, color.r);
+            g = Math.max(g, color.g);
+            b = Math.max(b, color.b);
           } else {
-            // Multi-species: vivid species colors, additive blend
             const sc = SLIME_SPECIES_COLORS[sp];
-            r = Math.min(255, r + sc.r * bright * (1 + heat));
-            g = Math.min(255, g + sc.g * bright * (1 + heat));
-            b = Math.min(255, b + sc.b * bright * (1 + heat));
+            // Additive blend, clamped — vivid species colours
+            r = Math.min(255, r + sc.r * bright * (1.2 + heat * 0.8));
+            g = Math.min(255, g + sc.g * bright * (1.2 + heat * 0.8));
+            b = Math.min(255, b + sc.b * bright * (1.2 + heat * 0.8));
           }
         }
 
-        if (maxVal <= 0.5) continue;
+        if (maxVal < 1) continue;
 
-        const alpha = Math.min(245, 20 + (Math.min(1, maxVal / (MAX_PHEROMONE * 0.3))) * 230);
-        const p = (py * WORLD_WIDTH + px) * 4;
-        image.data[p]     = r > 255 ? 255 : r;
-        image.data[p + 1] = g > 255 ? 255 : g;
-        image.data[p + 2] = b > 255 ? 255 : b;
+        // Ramp alpha quickly so even thin trails are clearly visible
+        const alphaNorm = Math.min(1, maxVal / (MAX_PHEROMONE * 0.15));
+        const alpha = Math.min(245, 30 + alphaNorm * 215);
+        const p = (gy * GRID_WIDTH + gx) * 4;
+        image.data[p]     = r;
+        image.data[p + 1] = g;
+        image.data[p + 2] = b;
         image.data[p + 3] = alpha;
       }
     }
@@ -1793,45 +1794,43 @@ export default function App() {
     palette: TrailPalette
   ): ImageData {
     const currentSettings = settingsRef.current;
-    // Render at full canvas resolution — nearest-neighbour grid lookup, zero upscale blur
-    const image = new ImageData(WORLD_WIDTH, WORLD_HEIGHT);
+    // Build at grid resolution (275×180) — rendered scaled up with GPU bilinear in renderTrailCanvas
+    const image = new ImageData(GRID_WIDTH, GRID_HEIGHT);
     const ttl = currentSettings.pheromoneTtl;
     const intensity = currentSettings.trailIntensity;
     const isHeatmap = currentSettings.trailMode === "heatmap";
 
-    for (let py = 0; py < WORLD_HEIGHT; py++) {
-      const gy = py >> 2; // Math.floor(py / GRID_SCALE)
-      const gyBase = gy * GRID_WIDTH;
-      for (let px = 0; px < WORLD_WIDTH; px++) {
-        const gi = gyBase + (px >> 2); // Math.floor(px / GRID_SCALE)
+    for (let gy = 0; gy < GRID_HEIGHT; gy++) {
+      for (let gx = 0; gx < GRID_WIDTH; gx++) {
+        const gi = gridIndex(gx, gy);
         const fRaw = foodMap[gi];
         const hRaw = homeMap[gi];
         if (fRaw < 0.1 && hRaw < 0.1) continue;
 
-        const foodFreshness = fRaw > 0 ? (1 - foodAge[gi] / ttl > 0 ? 1 - foodAge[gi] / ttl : 0) : 0;
-        const homeFreshness = hRaw > 0 ? (1 - homeAge[gi] / ttl > 0 ? 1 - homeAge[gi] / ttl : 0) : 0;
+        const foodFreshness = fRaw > 0 ? Math.max(0, 1 - foodAge[gi] / ttl) : 0;
+        const homeFreshness = hRaw > 0 ? Math.max(0, 1 - homeAge[gi] / ttl) : 0;
         const foodValue = fRaw * foodFreshness * intensity;
         const homeValue = hRaw * homeFreshness * intensity;
         const foodPower = 1 - Math.exp(-foodValue / 90);
         const homePower = 1 - Math.exp(-homeValue / 80);
-        const combinedPower = foodPower + homePower > 1 ? 1 : foodPower + homePower;
+        const combinedPower = Math.min(1, foodPower + homePower);
 
         if (combinedPower <= 0.006) continue;
 
         const heat = Math.min(1, Math.log1p(foodValue + homeValue) / 7.25);
-        const freshness = foodFreshness > homeFreshness ? foodFreshness : homeFreshness;
+        const freshness = Math.max(foodFreshness, homeFreshness);
 
         const color = paletteColor(palette, foodPower, homePower, combinedPower, heat, freshness);
         const alphaBase = isHeatmap
-          ? (40 + heat * 220 > 245 ? 245 : 40 + heat * 220)
-          : (24 + combinedPower * 200 > 230 ? 230 : 24 + combinedPower * 200);
-        const alpha = alphaBase * (0.4 + freshness * 0.8 > 1 ? 1 : 0.4 + freshness * 0.8);
+          ? Math.min(245, 40 + heat * 220)
+          : Math.min(230, 24 + combinedPower * 200);
+        const alpha = Math.min(245, alphaBase * Math.min(1, 0.4 + freshness * 0.8));
 
-        const p = (py * WORLD_WIDTH + px) * 4;
+        const p = (gy * GRID_WIDTH + gx) * 4;
         image.data[p]     = color.r;
         image.data[p + 1] = color.g;
         image.data[p + 2] = color.b;
-        image.data[p + 3] = alpha > 245 ? 245 : alpha;
+        image.data[p + 3] = alpha;
       }
     }
 
@@ -1872,36 +1871,38 @@ export default function App() {
     if (!offCtx) return;
 
     const ca = currentSettings.chromaticAberration;
-    const finalImage = ca > 0.1 ? applyChromaAberration(image, ca * 2.5) : image;
+    // Image is now grid-resolution (275×180); shift in grid pixels ≈ world-pixels/4
+    const finalImage = ca > 0.1 ? applyChromaAberration(image, ca * 0.65) : image;
     offCtx.putImageData(finalImage, 0, 0);
 
     ctx.save();
     ctx.globalCompositeOperation = compositeOp;
 
+    // Offscreen is grid resolution (275×180); scale up to world size with bilinear for smooth trails
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+
     if (currentSettings.trailBloom > 0) {
       const bloom = currentSettings.trailBloom;
 
-      // Bloom at canvas native resolution — no drawImage scaling needed (1:1)
-      // Radii are in CSS pixels, so scale stays the same regardless of trail resolution
       ctx.filter = `blur(${bloom * 12}px)`;
       ctx.globalAlpha = clamp(bloom * 0.18, 0, 0.55);
-      ctx.drawImage(offscreen, 0, 0);
+      ctx.drawImage(offscreen, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
 
       ctx.filter = `blur(${bloom * 5}px)`;
       ctx.globalAlpha = clamp(bloom * 0.32, 0, 0.75);
-      ctx.drawImage(offscreen, 0, 0);
+      ctx.drawImage(offscreen, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
 
       ctx.filter = `blur(${bloom * 2}px)`;
       ctx.globalAlpha = clamp(bloom * 0.55, 0, 0.92);
-      ctx.drawImage(offscreen, 0, 0);
+      ctx.drawImage(offscreen, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
 
       ctx.filter = "none";
       ctx.globalAlpha = 1;
     }
 
-    // Crisp core pass — no scaling, offscreen and ctx are same pixel dimensions
-    ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(offscreen, 0, 0);
+    // Core pass — bilinear upscale gives smooth gradients, no blocky 4×4 cells
+    ctx.drawImage(offscreen, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
     ctx.restore();
   }
 
@@ -1921,7 +1922,7 @@ export default function App() {
 
   function drawPheromones(ctx: CanvasRenderingContext2D) {
     const currentSettings = settingsRef.current;
-    const offscreen = getOrCreateOffscreen(trailCanvasRef, WORLD_WIDTH, WORLD_HEIGHT);
+    const offscreen = getOrCreateOffscreen(trailCanvasRef, GRID_WIDTH, GRID_HEIGHT);
 
     const image = buildTrailImage(
       foodPheromoneRef.current,
@@ -1950,56 +1951,54 @@ export default function App() {
     const foodAge1 = colony1FoodAgeRef.current;
     const homeAge1 = colony1HomeAgeRef.current;
 
-    // Build both colony images at full canvas resolution (nearest-neighbour lookup)
-    const offscreen0 = getOrCreateOffscreen(trailCanvas0Ref, WORLD_WIDTH, WORLD_HEIGHT);
-    const offscreen1 = getOrCreateOffscreen(trailCanvas1Ref, WORLD_WIDTH, WORLD_HEIGHT);
-    const image0 = new ImageData(WORLD_WIDTH, WORLD_HEIGHT);
-    const image1 = new ImageData(WORLD_WIDTH, WORLD_HEIGHT);
+    // Build both colony images at grid resolution — GPU bilinear upscale on draw
+    const offscreen0 = getOrCreateOffscreen(trailCanvas0Ref, GRID_WIDTH, GRID_HEIGHT);
+    const offscreen1 = getOrCreateOffscreen(trailCanvas1Ref, GRID_WIDTH, GRID_HEIGHT);
+    const image0 = new ImageData(GRID_WIDTH, GRID_HEIGHT);
+    const image1 = new ImageData(GRID_WIDTH, GRID_HEIGHT);
 
-    for (let py = 0; py < WORLD_HEIGHT; py++) {
-      const gy = py >> 2;
-      const gyBase = gy * GRID_WIDTH;
-      for (let px = 0; px < WORLD_WIDTH; px++) {
-        const gi = gyBase + (px >> 2);
-        const p = (py * WORLD_WIDTH + px) * 4;
+    for (let gy = 0; gy < GRID_HEIGHT; gy++) {
+      for (let gx = 0; gx < GRID_WIDTH; gx++) {
+        const gi = gridIndex(gx, gy);
+        const p = (gy * GRID_WIDTH + gx) * 4;
 
         // Colony 0 (amber)
         const f0 = food0[gi], h0 = home0[gi];
         if (f0 >= 0.1 || h0 >= 0.1) {
-          const ff0 = f0 > 0 ? (1 - foodAge0[gi] / ttl > 0 ? 1 - foodAge0[gi] / ttl : 0) : 0;
-          const hf0 = h0 > 0 ? (1 - homeAge0[gi] / ttl > 0 ? 1 - homeAge0[gi] / ttl : 0) : 0;
+          const ff0 = f0 > 0 ? Math.max(0, 1 - foodAge0[gi] / ttl) : 0;
+          const hf0 = h0 > 0 ? Math.max(0, 1 - homeAge0[gi] / ttl) : 0;
           const fv0 = f0 * ff0 * intensity, hv0 = h0 * hf0 * intensity;
           const fp0 = 1 - Math.exp(-fv0 / 90), hp0 = 1 - Math.exp(-hv0 / 80);
-          const cp0 = fp0 + hp0 > 1 ? 1 : fp0 + hp0;
+          const cp0 = Math.min(1, fp0 + hp0);
           if (cp0 > 0.006) {
             const heat = Math.min(1, Math.log1p(fv0 + hv0) / 7.25);
-            const fresh = ff0 > hf0 ? ff0 : hf0;
-            const aBase = isHeatmap ? 40 + heat * 220 : 24 + cp0 * 200;
-            const alpha = (aBase > 245 ? 245 : aBase) * (0.4 + fresh * 0.8 > 1 ? 1 : 0.4 + fresh * 0.8);
+            const fresh = Math.max(ff0, hf0);
+            const aBase = isHeatmap ? Math.min(245, 40 + heat * 220) : Math.min(245, 24 + cp0 * 200);
+            const alpha = Math.min(245, aBase * Math.min(1, 0.4 + fresh * 0.8));
             image0.data[p]     = Math.min(255, 180 + fp0 * 75 + heat * 60);
             image0.data[p + 1] = Math.min(255, 90 + fp0 * 100 + hp0 * 80 + heat * 40);
             image0.data[p + 2] = Math.min(255, fp0 * 30 + hp0 * 20);
-            image0.data[p + 3] = alpha > 245 ? 245 : alpha;
+            image0.data[p + 3] = alpha;
           }
         }
 
         // Colony 1 (cyan)
         const f1 = food1[gi], h1 = home1[gi];
         if (f1 >= 0.1 || h1 >= 0.1) {
-          const ff1 = f1 > 0 ? (1 - foodAge1[gi] / ttl > 0 ? 1 - foodAge1[gi] / ttl : 0) : 0;
-          const hf1 = h1 > 0 ? (1 - homeAge1[gi] / ttl > 0 ? 1 - homeAge1[gi] / ttl : 0) : 0;
+          const ff1 = f1 > 0 ? Math.max(0, 1 - foodAge1[gi] / ttl) : 0;
+          const hf1 = h1 > 0 ? Math.max(0, 1 - homeAge1[gi] / ttl) : 0;
           const fv1 = f1 * ff1 * intensity, hv1 = h1 * hf1 * intensity;
           const fp1 = 1 - Math.exp(-fv1 / 90), hp1 = 1 - Math.exp(-hv1 / 80);
-          const cp1 = fp1 + hp1 > 1 ? 1 : fp1 + hp1;
+          const cp1 = Math.min(1, fp1 + hp1);
           if (cp1 > 0.006) {
             const heat = Math.min(1, Math.log1p(fv1 + hv1) / 7.25);
-            const fresh = ff1 > hf1 ? ff1 : hf1;
-            const aBase = isHeatmap ? 40 + heat * 220 : 24 + cp1 * 200;
-            const alpha = (aBase > 245 ? 245 : aBase) * (0.4 + fresh * 0.8 > 1 ? 1 : 0.4 + fresh * 0.8);
+            const fresh = Math.max(ff1, hf1);
+            const aBase = isHeatmap ? Math.min(245, 40 + heat * 220) : Math.min(245, 24 + cp1 * 200);
+            const alpha = Math.min(245, aBase * Math.min(1, 0.4 + fresh * 0.8));
             image1.data[p]     = Math.min(255, fp1 * 20 + hp1 * 10);
             image1.data[p + 1] = Math.min(255, 160 + fp1 * 80 + heat * 50);
             image1.data[p + 2] = Math.min(255, 180 + fp1 * 75 + hp1 * 55 + heat * 40);
-            image1.data[p + 3] = alpha > 245 ? 245 : alpha;
+            image1.data[p + 3] = alpha;
           }
         }
       }
@@ -2010,22 +2009,23 @@ export default function App() {
     const offCtx1 = offscreen1.getContext("2d");
     if (offCtx1) offCtx1.putImageData(image1, 0, 0);
 
-    // Render both colonies — 1:1, no upscale
+    // Render both colonies — bilinear upscale from grid to world resolution
     for (const offscreen of [offscreen0, offscreen1]) {
       ctx.save();
       ctx.globalCompositeOperation = "screen";
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
       if (bloom > 0) {
         ctx.filter = `blur(${bloom * 8}px)`;
         ctx.globalAlpha = clamp(bloom * 0.28, 0, 0.65);
-        ctx.drawImage(offscreen, 0, 0);
+        ctx.drawImage(offscreen, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
         ctx.filter = `blur(${bloom * 3}px)`;
         ctx.globalAlpha = clamp(bloom * 0.45, 0, 0.85);
-        ctx.drawImage(offscreen, 0, 0);
+        ctx.drawImage(offscreen, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
         ctx.filter = "none";
         ctx.globalAlpha = 1;
       }
-      ctx.imageSmoothingEnabled = false;
-      ctx.drawImage(offscreen, 0, 0);
+      ctx.drawImage(offscreen, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
       ctx.restore();
     }
   }
