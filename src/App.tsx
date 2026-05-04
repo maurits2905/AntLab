@@ -201,6 +201,7 @@ const STAR_FIELD = Array.from({ length: 220 }, () => ({
 
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const stageRef = useRef<HTMLElement | null>(null);
   const trailCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const trailCanvas0Ref = useRef<HTMLCanvasElement | null>(null);
   const trailCanvas1Ref = useRef<HTMLCanvasElement | null>(null);
@@ -252,6 +253,7 @@ export default function App() {
 
   const [tool, setTool] = useState<Tool>("food");
   const [isPaused, setIsPaused] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
   const [settings, setSettings] = useState<Settings>({
     viewMode: "colony",
@@ -2621,6 +2623,24 @@ export default function App() {
     link.click();
   }, []);
 
+  function toggleFullscreen() {
+    const stage = stageRef.current;
+    if (!stage) return;
+    if (!document.fullscreenElement) {
+      stage.requestFullscreen().catch(() => {});
+    } else {
+      document.exitFullscreen();
+    }
+  }
+
+  useEffect(() => {
+    function onFsChange() {
+      setIsFullscreen(!!document.fullscreenElement);
+    }
+    document.addEventListener("fullscreenchange", onFsChange);
+    return () => document.removeEventListener("fullscreenchange", onFsChange);
+  }, []);
+
   // Reinitialise slime agents when count changes in physarum mode
   useEffect(() => {
     if (settingsRef.current.viewMode === "physarum") {
@@ -3012,7 +3032,7 @@ export default function App() {
       </aside>
 
       {/* ══ Stage ════════════════════════════════ */}
-      <section className="stage">
+      <section className="stage" ref={stageRef}>
         <div className="stageHeader">
           <div className="stageTitle">
             <div className="stageModeChip">{modeLabel[mode]}</div>
@@ -3033,16 +3053,21 @@ export default function App() {
               <span><i className="dot wallDot" />Wall</span>
             </>)}
           </div>
+          <button className="fullscreenBtn" title={isFullscreen ? "Exit fullscreen" : "Fullscreen"} onClick={toggleFullscreen}>
+            {isFullscreen ? "⊡" : "⛶"}
+          </button>
         </div>
-        <canvas
-          ref={canvasRef}
-          width={WORLD_WIDTH}
-          height={WORLD_HEIGHT}
-          onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={handlePointerUp}
-          onPointerLeave={handlePointerUp}
-        />
+        <div className="stageCanvasWrap">
+          <canvas
+            ref={canvasRef}
+            width={WORLD_WIDTH}
+            height={WORLD_HEIGHT}
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerUp={handlePointerUp}
+            onPointerLeave={handlePointerUp}
+          />
+        </div>
       </section>
     </main>
   );

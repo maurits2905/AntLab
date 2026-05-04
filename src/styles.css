@@ -13,7 +13,6 @@
 body {
   margin: 0;
   min-width: 320px;
-  min-height: 100vh;
   background:
     radial-gradient(circle at 8% 4%,   rgba(126,231,135,.14), transparent 28rem),
     radial-gradient(circle at 88% 10%,  rgba(103,183,255,.13), transparent 34rem),
@@ -61,8 +60,9 @@ button.active {
   display: grid;
   grid-template-columns: clamp(272px, 26vw, 370px) minmax(0,1fr);
   gap: 1rem;
-  min-height: 100vh;
+  height: 100vh;       /* locked to viewport — no app-level scroll */
   padding: 1rem;
+  overflow: hidden;
 }
 
 .panel, .stage {
@@ -75,10 +75,11 @@ button.active {
   border-radius: 26px;
 }
 
+/* ── Panel ── fills full column height, scrolls internally ── */
 .panel {
-  padding: 1.1rem 0.9rem 1.1rem;
-  overflow: auto;
-  max-height: calc(100vh - 2rem);
+  height: 100%;
+  padding: 1.1rem 0.9rem;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 0.6rem;
@@ -391,12 +392,14 @@ select:focus {
 .colonyStatRow.colonyA .colonyDot { background: #ffb347; box-shadow: 0 0 8px rgba(255,179,71,.7); }
 .colonyStatRow.colonyB .colonyDot { background: #00e5ff; box-shadow: 0 0 8px rgba(0,229,255,.7); }
 
-/* ── Stage ── */
+/* ── Stage ── flex column so header + canvas fill the height ── */
 .stage {
+  height: 100%;
   min-width: 0;
   padding: 1rem;
-  display: grid;
-  grid-template-rows: auto minmax(0,1fr);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   background:
     radial-gradient(circle at 30% 20%, rgba(103,183,255,.06), transparent 24rem),
     radial-gradient(circle at 80% 70%, rgba(126,231,135,.055), transparent 22rem),
@@ -404,11 +407,13 @@ select:focus {
 }
 
 .stageHeader {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 1rem;
+  gap: 0.75rem;
   padding: 0.3rem 0.25rem 0.85rem;
+  flex-wrap: wrap;
 }
 
 .stageTitle {
@@ -460,29 +465,35 @@ select:focus {
   white-space: nowrap;
 }
 
-/* ── Dots ── */
-.dot {
-  width: 0.62rem;
-  height: 0.62rem;
-  display: inline-block;
-  border-radius: 50%;
+/* ── Fullscreen button ── */
+.fullscreenBtn {
   flex-shrink: 0;
+  width: 2.4rem;
+  height: 2.4rem;
+  padding: 0;
+  border-radius: 10px;
+  font-size: 1.1rem;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
-.foodTrail  { background: #67b7ff; box-shadow: 0 0 8px rgba(103,183,255,.75); }
-.homeTrail  { background: #7ee787; box-shadow: 0 0 8px rgba(126,231,135,.75); }
-.wallDot    { background: #303747; }
-.colonyADot { background: #ffb347; box-shadow: 0 0 8px rgba(255,179,71,.75); }
-.colonyBDot { background: #00e5ff; box-shadow: 0 0 8px rgba(0,229,255,.75); }
-.slimeDot0  { background: #39ff8f; box-shadow: 0 0 8px rgba(57,255,143,.75); }
-.slimeDot1  { background: #ff6e3a; box-shadow: 0 0 8px rgba(255,110,58,.75); }
-.slimeDot2  { background: #44aaff; box-shadow: 0 0 8px rgba(68,170,255,.75); }
-
-/* ── Canvas ── */
-canvas {
+/* ── Canvas wrap — takes remaining height in stage flex ── */
+.stageCanvasWrap {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: flex-start;
   width: 100%;
-  height: auto;
-  max-height: min(calc(100vh - 7.5rem), calc((100vw - clamp(272px, 26vw, 370px)) * 720 / 1100));
+}
+
+/* ── Canvas — height-first so aspect ratio is never violated ── */
+canvas {
+  /* Height fills the wrapper, width adjusts to preserve aspect ratio */
+  height: 100%;
+  width: auto;
+  max-width: 100%;
   aspect-ratio: 1100 / 720;
   border-radius: 20px;
   display: block;
@@ -503,29 +514,88 @@ canvas:hover {
     0 0 48px color-mix(in srgb, var(--mode-accent) 8%, transparent);
 }
 
+/* ── Fullscreen ── */
+.stage:fullscreen,
+.stage:-webkit-full-screen {
+  border-radius: 0;
+  padding: 0.75rem 1rem;
+  height: 100vh;
+  background: #070a10;
+}
+
+.stage:fullscreen .stageCanvasWrap,
+.stage:-webkit-full-screen .stageCanvasWrap {
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+}
+
+.stage:fullscreen canvas,
+.stage:-webkit-full-screen canvas {
+  height: 100%;
+  max-width: 100%;
+  width: auto;
+  max-height: 100%;
+  border-radius: 0;
+}
+
+/* ── Dots ── */
+.dot {
+  width: 0.62rem;
+  height: 0.62rem;
+  display: inline-block;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.foodTrail  { background: #67b7ff; box-shadow: 0 0 8px rgba(103,183,255,.75); }
+.homeTrail  { background: #7ee787; box-shadow: 0 0 8px rgba(126,231,135,.75); }
+.wallDot    { background: #303747; }
+.colonyADot { background: #ffb347; box-shadow: 0 0 8px rgba(255,179,71,.75); }
+.colonyBDot { background: #00e5ff; box-shadow: 0 0 8px rgba(0,229,255,.75); }
+.slimeDot0  { background: #39ff8f; box-shadow: 0 0 8px rgba(57,255,143,.75); }
+.slimeDot1  { background: #ff6e3a; box-shadow: 0 0 8px rgba(255,110,58,.75); }
+.slimeDot2  { background: #44aaff; box-shadow: 0 0 8px rgba(68,170,255,.75); }
+
 /* ── Responsive ── */
 
-/* Compact at large-but-tight viewports */
+/* Tighter at mid-range */
 @media (max-width: 1300px) {
   .app { gap: 0.75rem; padding: 0.75rem; }
   .panel { gap: 0.5rem; }
   h1 { font-size: 1.85rem; }
 }
 
-/* Stageheader wraps before going single-column */
-@media (max-width: 1100px) {
-  .stageHeader { flex-wrap: wrap; gap: 0.55rem; }
-  .legend { justify-content: flex-start; }
-}
-
-/* Single-column */
+/* Single-column — app becomes scrollable, each section natural height */
 @media (max-width: 960px) {
-  .app { grid-template-columns: 1fr; }
-  .panel { max-height: none; order: 2; }
-  .stage { order: 1; }
+  .app {
+    grid-template-columns: 1fr;
+    height: auto;
+    overflow: visible;
+    padding: 0.75rem;
+    gap: 0.75rem;
+  }
+  .panel {
+    height: auto;
+    overflow-y: visible;
+    order: 2;
+  }
+  .stage {
+    height: auto;
+    order: 1;
+    overflow: visible;
+  }
   .stageHeader { align-items: flex-start; flex-direction: column; }
   .legend { justify-content: flex-start; }
-  canvas { max-height: min(calc(100svh - 11rem), 75vw); }
+  .stageCanvasWrap {
+    height: auto;
+  }
+  canvas {
+    /* Switch back to width-first on mobile */
+    width: 100%;
+    height: auto;
+    max-width: 100%;
+  }
 }
 
 /* Narrow mobile */
@@ -542,6 +612,5 @@ canvas:hover {
   .speciesRow { gap: 0.3rem; }
   .actionGrid { grid-template-columns: 1fr 1fr; gap: 0.32rem; }
   .section { padding: 0.7rem 0.65rem; }
-  canvas { max-height: min(calc(100svh - 9rem), 80vw); }
   .legend { padding: 0.4rem 0.6rem; font-size: 0.75rem; gap: 0.5rem; }
 }
